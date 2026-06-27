@@ -1,6 +1,6 @@
 # MyCloud - 轻量私有云盘
 
-基于 Cloudflare Workers + KV + R2 的全功能私有云存储系统，单文件架构，零服务器成本，部署即用。
+基于 Cloudflare Workers + KV + R2 的全功能私有云存储系统，单文件架构，带WebDAV 的服务，零服务器成本，部署即用。
 
 ## 特性概览
 
@@ -14,16 +14,15 @@
 ## 多版本 
 
 - 多用户版:	worker.js
-- 单用户版:		worker_Single.js
-- WEBdav纯后台版:	worker_webdav.js
-- WEBdav网页UI版:worker_webdavUI.js
-
-## 多版本 
-
-- 多用户版:worker.js
-- 单用户版:worker_Single.js
+- 单用户版:	worker_Single.js
 - WEBdav纯后台版:worker_webdav.js
 - WEBdav网页UI版:worker_webdavUI.js
+
+## 管理员登录 
+
+(ADMIN_PASSWORD:填写的就是管理员登录密码)
+!!!管理员登录 输入密码后, 点击游客登录.
+管理员登录WEBdav:账户随意填写 填写管理员密码.
 
 ## Cloudflare部署指南
 
