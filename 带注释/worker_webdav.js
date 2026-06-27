@@ -52,6 +52,8 @@ function normalizePath(p) {
   return p;
 }
 
+// --- R2 辅助函数 ---
+
 async function deleteR2Folder(env, key) {
   let cursor;
   do {
@@ -85,6 +87,7 @@ async function copyR2Folder(env, srcKey, dstKey) {
   } while (cursor);
 }
 
+// 解析 WebDAV MOVE/COPY 的 Destination header，返回 { srcKey, dstKey }
 async function parseDavDestination(request, davPath) {
   const destHeader = request.headers.get('Destination');
   if (!destHeader) return new Response('Missing Destination header', { status: 400 });
@@ -99,6 +102,7 @@ async function parseDavDestination(request, davPath) {
   }
 }
 
+// --- WebDAV XML 辅助 ---
 
 function xmlEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -115,6 +119,8 @@ function davXmlResponse(body, status = 207) {
     headers: { 'Content-Type': 'application/xml; charset=utf-8' }
   });
 }
+
+// --- 认证 ---
 
 async function verifyDavAuth(request, env) {
   const authHeader = request.headers.get('Authorization');
@@ -143,6 +149,8 @@ function requireDavAuth(request, resType = 'text') {
   return new Response('Unauthorized', { status: 401, headers });
 }
 
+// --- WebDAV 方法处理 ---
+
 function handleDavOptions() {
   return new Response(null, {
     status: 200,
@@ -162,6 +170,8 @@ async function handleDavPropfind(request, env, davPath) {
   try {
     const depth = request.headers.get('Depth') || 'infinity';
     const baseUrl = new URL(request.url).origin + '/dav/';
+
+    // 检查是否是文件
     const fileObj = davPath ? await env.R2_BUCKET.get(davPath) : null;
     if (fileObj) {
       const name = davPath.split('/').pop();
@@ -185,6 +195,8 @@ async function handleDavPropfind(request, env, davPath) {
 </d:multistatus>`;
       return new Response(xml, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
     }
+
+    // 目录 —— 列出内容
     const prefix = davPath ? davPath + '/' : '';
     const objects = [];
     const folders = new Set();
@@ -207,6 +219,8 @@ async function handleDavPropfind(request, env, davPath) {
     } while (cursor);
 
     let xml = '<d:multistatus xmlns:d="DAV:">\n';
+
+    // 当前目录本身
     if (depth !== '1') {
       xml += `  <d:response>
     <d:href>${xmlEscape(baseUrl + (davPath ? davPath + '/' : ''))}</d:href>
@@ -227,6 +241,8 @@ async function handleDavPropfind(request, env, davPath) {
       xml += '</d:multistatus>';
       return davXmlResponse(xml);
     }
+
+    // 子文件夹
     for (const folderName of folders) {
       const folderPath = (davPath ? davPath + '/' : '') + folderName;
       xml += `  <d:response>
@@ -243,6 +259,8 @@ async function handleDavPropfind(request, env, davPath) {
     </d:propstat>
   </d:response>\n`;
     }
+
+    // 子文件
     for (const obj of objects) {
       const objPath = obj.key;
       const name = objPath.split('/').pop();
@@ -341,6 +359,8 @@ async function handleDavPut(request, env, davPath) {
   try {
     const key = davPath;
     const overwrite = request.headers.get('Overwrite') !== 'F';
+
+    // 检查目标是否是文件夹
     const folderCheck = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
     if (folderCheck.objects?.length > 0 || folderCheck.delimitedPrefixes?.length > 0) {
       return new Response('Target is a collection', { status: 405 });
@@ -386,6 +406,8 @@ async function handleDavMkcol(request, env, davPath) {
     if (existingDir.objects?.length > 0 || existingDir.delimitedPrefixes?.length > 0) {
       return new Response(null, { status: 201 });
     }
+
+    // R2 没有真正目录，写一个 .keep 占位文件
     await env.R2_BUCKET.put(key + '/.keep', '', { httpMetadata: { contentType: 'text/plain' } });
     return new Response(null, { status: 201 });
   } catch (e) {
@@ -406,6 +428,7 @@ async function handleDavMove(request, env, davPath) {
 
     const srcObj = await env.R2_BUCKET.get(srcKey);
     if (!srcObj) {
+      // 源是文件夹
       const srcCheck = await env.R2_BUCKET.list({ prefix: srcKey + '/', delimiter: '/', limit: 1 });
       if (!srcCheck.objects?.length && !srcCheck.delimitedPrefixes?.length) {
         return new Response('Not Found', { status: 404 });
@@ -490,11 +513,16 @@ function handleDavUnlock() {
   return new Response(null, { status: 204 });
 }
 
+// ============================================================
+// Main router
+// ============================================================
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = decodeURIComponent(url.pathname);
     const method = request.method;
+
+    // CORS preflight
     if (method === 'OPTIONS' && path.startsWith('/dav')) {
       return new Response(null, {
         headers: {

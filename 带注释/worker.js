@@ -1,21 +1,43 @@
 /**
- * name = "mycloud-single"
- * 单用户精简版 —— 仅管理员密码登录，全功能文件管理
- *
- * [[kv_namespaces]]
- * binding = "KV_STORE"
- * id = "你的KV命名空间ID"
- *
- * [[r2_buckets]]
- * binding = "R2_BUCKET"
- * bucket_name = "你的R2桶名"
- *
- * [vars]
- * ADMIN_PASSWORD = "你的管理员密码"
- */
+name = "mycloud"
+
+[[kv_namespaces]]
+binding = "KV_STORE"
+id = "你的KV命名空间ID"
+
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "你的R2桶名"
+
+[vars]
+ADMIN_PASSWORD = "你的管理员密码"
+*/
+function generateId(length = 16) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  const randomValues = new Uint8Array(length);
+  crypto.getRandomValues(randomValues);
+  for (let i = 0; i < length; i++) {
+    result += chars[randomValues[i] % chars.length];
+  }
+  return result;
+}
+
+async function hashPassword(password) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(password);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
 function makeTokenCookie(token, maxAge = 86400) {
   return { 'Set-Cookie': `token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}` };
+}
+
+async function incrementStat(env, key, delta = 1) {
+  const val = parseInt(await env.KV_STORE.get(key) || '0') + delta;
+  await env.KV_STORE.put(key, String(Math.max(0, val)));
 }
 
 function base64UrlEncode(str) {
@@ -84,6 +106,17 @@ async function verifyJWT(token, secret) {
   }
 }
 
+function getExpirationTime(expiresIn) {
+  const now = Date.now();
+  switch (expiresIn) {
+    case '1h': return now + 60 * 60 * 1000;
+    case '1d': return now + 24 * 60 * 60 * 1000;
+    case '1m': return now + 30 * 24 * 60 * 60 * 1000;
+    case 'permanent': return null;
+    default: return now + 24 * 60 * 60 * 1000;
+  }
+}
+
 function formatFileSize(bytes) {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -136,12 +169,31 @@ function getMimeType(filename) {
 
 function getPreviewType(filename) {
   const ext = filename.split('.').pop().toLowerCase();
-  if (['jpg','jpeg','png','gif','webp','svg','ico','bmp'].includes(ext)) return 'image';
-  if (ext === 'pdf') return 'pdf';
-  if (['txt','md','json','js','ts','css','html','htm','xml','yaml','yml','ini','conf','cfg','sh','py','php','java','c','cpp','go','rs','rb','lua','sql','csv','log','bat','ps1','vue','tsx','jsx','toml','properties','pl','dart','tf','proto'].includes(ext)) return 'text';
-  if (ext === 'docx') return 'word';
-  if (['mp4','webm','ogg'].includes(ext)) return 'video';
-  if (['mp3','wav','flac','m4a'].includes(ext)) return 'audio';
+
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico', 'bmp'].includes(ext)) {
+    return 'image';
+  }
+
+  if (ext === 'pdf') {
+    return 'pdf';
+  }
+
+  if (['txt', 'md', 'json', 'js', 'ts', 'css', 'html', 'htm', 'xml', 'yaml', 'yml', 'ini', 'conf', 'cfg', 'sh', 'bash', 'zsh', 'py', 'php', 'java', 'c', 'cpp', 'h', 'hpp', 'go', 'rs', 'rb', 'lua', 'swift', 'kt', 'scala', 'r', 'vue', 'tsx', 'jsx', 'toml', 'csv', 'sql', 'log', 'bat', 'ps1', 'makefile', 'dockerfile', 'gitignore', 'env', 'properties', 'pl', 'pm', 'coffee', 'dart', 'tf', 'proto'].includes(ext)) {
+    return 'text';
+  }
+
+  if (ext === 'docx') {
+    return 'word';
+  }
+
+  if (['mp4', 'webm', 'ogg'].includes(ext)) {
+    return 'video';
+  }
+
+  if (['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(ext)) {
+    return 'audio';
+  }
+
   return null;
 }
 
@@ -157,73 +209,52 @@ function parseCookies(request) {
   return cookies;
 }
 
-function jsonResponse(data, status = 200, extraHeaders = {}) {
+function jsonResponse(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
-    status, headers: { 'Content-Type': 'application/json', ...extraHeaders }
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers
+    }
   });
 }
 
-function htmlResponse(html, status = 200, extraHeaders = {}) {
+function htmlResponse(html, status = 200, headers = {}) {
   return new Response(html, {
-    status, headers: { 'Content-Type': 'text/html; charset=utf-8', ...extraHeaders }
+    status,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      ...headers
+    }
   });
-}
-
-async function deleteR2Folder(env, key) {
-  let cursor;
-  do {
-    const batch = await env.R2_BUCKET.list({ prefix: key + '/', cursor });
-    if (batch.objects?.length) {
-      await env.R2_BUCKET.delete(batch.objects.map(obj => obj.key));
-    }
-    cursor = batch.truncated ? batch.cursor : null;
-  } while (cursor);
-  await env.R2_BUCKET.delete(key);
-}
-
-async function copyR2Folder(env, srcKey, dstKey) {
-  let cursor;
-  do {
-    const batch = await env.R2_BUCKET.list({ prefix: srcKey + '/', cursor });
-    if (batch.objects?.length) {
-      const srcObjects = await Promise.all(
-        batch.objects.map(obj => env.R2_BUCKET.get(obj.key))
-      );
-      await Promise.all(
-        batch.objects.map((obj, i) => {
-          const srcObj = srcObjects[i];
-          if (!srcObj) return Promise.resolve();
-          const newKey = dstKey + obj.key.slice(srcKey.length);
-          return env.R2_BUCKET.put(newKey, srcObj.body, { httpMetadata: srcObj.httpMetadata });
-        })
-      );
-    }
-    cursor = batch.truncated ? batch.cursor : null;
-  } while (cursor);
-}
-
-async function parseDavDestination(request, davPath) {
-  const destHeader = request.headers.get('Destination');
-  if (!destHeader) return new Response('Missing Destination header', { status: 400 });
-  try {
-    const destUrl = new URL(destHeader);
-    let destPath = destUrl.pathname;
-    if (destPath === '/dav' || destPath === '/dav/') destPath = '';
-    else if (destPath.startsWith('/dav/')) destPath = destPath.slice(5);
-    if (destPath.startsWith('/')) destPath = destPath.slice(1);
-    return { srcKey: davPath, dstKey: destPath.replace(/\/$/, '') };
-  } catch {
-    return new Response('Invalid Destination URL', { status: 400 });
-  }
 }
 
 async function handleLogin(request, env) {
   try {
-    const { password } = await request.json();
-    if (!password) return jsonResponse({ success: false, message: '请输入密码' }, 400);
-    if (password !== env.ADMIN_PASSWORD) return jsonResponse({ success: false, message: '密码错误' }, 401);
-    return jsonResponse({ success: true, role: 'admin' }, 200,
-      makeTokenCookie(await createJWT({ role: 'admin', exp: Date.now() + 86400000 }, env.ADMIN_PASSWORD)));
+    const { email, password, isAdmin, isGuest } = await request.json();
+
+    if (isGuest) {
+      if (!(await getGlobalSettings(env)).guestLogin) return jsonResponse({ success: false, message: '管理员已关闭游客登录' }, 403);
+      return jsonResponse({ success: true, role: 'guest' }, 200,
+        makeTokenCookie(await createJWT({ role: 'guest', exp: Date.now() + 86400000 }, env.ADMIN_PASSWORD)));
+    }
+
+    if (isAdmin) {
+      if (password !== env.ADMIN_PASSWORD) return jsonResponse({ success: false, message: '密码错误' }, 401);
+      return jsonResponse({ success: true, role: 'admin' }, 200,
+        makeTokenCookie(await createJWT({ role: 'admin', exp: Date.now() + 86400000 }, env.ADMIN_PASSWORD)));
+    }
+
+    if (!email || !password) return jsonResponse({ success: false, message: '请输入邮箱和密码' }, 400);
+
+    const userData = await env.KV_STORE.get(`user:${email}`);
+    if (!userData) return jsonResponse({ success: false, message: '用户不存在' }, 401);
+
+    const user = JSON.parse(userData);
+    if (user.passwordHash !== await hashPassword(password)) return jsonResponse({ success: false, message: '密码错误' }, 401);
+
+    return jsonResponse({ success: true, role: 'user', email: user.email }, 200,
+      makeTokenCookie(await createJWT({ email: user.email, role: 'user', exp: Date.now() + 86400000 }, env.ADMIN_PASSWORD)));
   } catch (e) {
     return jsonResponse({ success: false, message: '登录失败: ' + e.message }, 500);
   }
@@ -240,7 +271,9 @@ async function handleLogout() {
 async function verifyAuth(request, env) {
   const cookies = parseCookies(request);
   const token = cookies.token;
+
   if (!token) return null;
+
   return await verifyJWT(token, env.ADMIN_PASSWORD);
 }
 
@@ -252,20 +285,196 @@ async function requireAuth(request, env) {
   return auth;
 }
 
+async function requireAdmin(request, env) {
+  const auth = await verifyAuth(request, env);
+  if (!auth || auth.role !== 'admin') {
+    return jsonResponse({ success: false, message: '需要管理员权限' }, 403);
+  }
+  return auth;
+}
+
+// --- 通用辅助函数 ---
 function normalizePath(p) {
   if (!p) return '';
   if (p.startsWith('/')) p = p.slice(1);
   return p;
 }
 
+function normalizeFolder(f) {
+  if (!f) return '';
+  return f.replace(/^\/+|\/+$/g, '');
+}
+
+function apiPathToFilePath(apiPath) {
+  const prefixes = ['/api/files', '/api/preview', '/api/download', '/api/edit'];
+  for (const p of prefixes) {
+    if (apiPath.startsWith(p)) {
+      const rest = apiPath.slice(p.length);
+      return rest || '/';
+    }
+  }
+  return apiPath;
+}
+
+async function checkPathAccess(auth, env, targetPath) {
+  // 通用路径权限检查：同时处理游客和注册用户
+  const key = auth.role === 'guest' ? '__guest__' : (auth.email || null);
+  if (!key) return null;
+  const limits = await getUserLimits(env, key);
+  if (!limits.allowedFolders || limits.allowedFolders.length === 0) return null;
+  const t = normalizeFolder(targetPath);
+  const allowed = limits.allowedFolders.some(f => {
+    const norm = normalizeFolder(f);
+    return t === norm || t.startsWith(norm + '/');
+  });
+  if (!allowed) {
+    const msg = auth.role === 'guest'
+      ? `游客只能访问 ${limits.allowedFolders.join(', ')} 文件夹`
+      : '你没有权限执行此操作';
+    return jsonResponse({ success: false, message: msg }, 403);
+  }
+  return null;
+}
+
+// --- 公共辅助函数 ---
+
+// 获取游客允许的文件夹列表（含默认值 ['guest']）
+async function getGuestAllowedFolders(env) {
+  const limits = await getUserLimits(env, '__guest__');
+  return (limits && limits.allowedFolders && limits.allowedFolders.length > 0)
+    ? limits.allowedFolders.map(f => normalizeFolder(f))
+    : ['guest'];
+}
+
+// 解析 WebDAV MOVE/COPY 的 Destination header，返回 { srcKey, dstKey }
+// 解析失败直接返回 Response 错误，成功返回 null 并把结果写入 out 对象
+async function parseDavDestination(request, davPath, auth, env, checkSrcAccess) {
+  const destHeader = request.headers.get('Destination');
+  if (!destHeader) return new Response('Missing Destination header', { status: 400 });
+  try {
+    const destUrl = new URL(destHeader);
+    const destPath = decodeURIComponent(destUrl.pathname.replace(/^\/dav\/?/, ''));
+    const srcKey = normalizePath(davPath);
+    const dstKey = normalizePath(destPath);
+    if (checkSrcAccess && auth.role !== 'admin') {
+      const srcErr = await checkPathAccess(auth, env, srcKey);
+      if (srcErr) return srcErr;
+    }
+    if (auth.role !== 'admin') {
+      const dstErr = await checkPathAccess(auth, env, dstKey);
+      if (dstErr) return dstErr;
+    }
+    return { srcKey, dstKey };
+  } catch (e) {
+    return new Response('Invalid Destination header', { status: 400 });
+  }
+}
+
+// 计算用户最大上传大小（字节），返回 0 表示不限制
+async function getMaxUploadSize(env, auth) {
+  const globalSettings = await getGlobalSettings(env);
+  let limits = null;
+  if (auth.role === 'guest') {
+    limits = await getUserLimits(env, '__guest__');
+  } else if (auth.email) {
+    limits = await getUserLimits(env, auth.email);
+  }
+  if (limits && limits.maxUploadSize > 0) return limits.maxUploadSize * 1024 * 1024;
+  if (globalSettings.maxUploadSize > 0) return globalSettings.maxUploadSize * 1024 * 1024;
+  return 0;
+}
+
+// 递归删除 R2 文件夹（前缀 key + '/' 的所有对象 + 文件夹本身）
+async function deleteR2Folder(env, key) {
+  let cursor;
+  do {
+    const batch = await env.R2_BUCKET.list({ prefix: key + '/', cursor });
+    if (batch.objects && batch.objects.length > 0) {
+      await env.R2_BUCKET.delete(batch.objects.map(obj => obj.key));
+    }
+    cursor = batch.truncated ? batch.cursor : null;
+  } while (cursor);
+  await env.R2_BUCKET.delete(key);
+}
+
+// 递归复制 R2 文件夹（srcKey -> dstKey），不删除源
+async function copyR2Folder(env, srcKey, dstKey) {
+  let cursor;
+  do {
+    const batch = await env.R2_BUCKET.list({ prefix: srcKey + '/', cursor });
+    if (batch.objects) {
+      for (const obj of batch.objects) {
+        const newKey = dstKey + '/' + obj.key.slice(srcKey.length + 1);
+        const srcFile = await env.R2_BUCKET.get(obj.key);
+        if (srcFile) {
+          await env.R2_BUCKET.put(newKey, srcFile.body, { httpMetadata: srcFile.httpMetadata });
+        }
+      }
+    }
+    cursor = batch.truncated ? batch.cursor : null;
+  } while (cursor);
+}
 
 async function handleListFiles(request, env, path) {
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
   try {
-    let prefix = normalizePath(path);
+    const filePathRaw = apiPathToFilePath(path);
+    let prefix = normalizePath(filePathRaw);
     if (prefix && !prefix.endsWith('/')) prefix += '/';
+
+    if (auth.role === 'guest') {
+      const allowedFolders = await getGuestAllowedFolders(env);
+      const guestRoot = allowedFolders[0] + '/';
+      if (prefix === '' || prefix === '/') {
+        prefix = guestRoot;
+      } else {
+        const guestErr = await checkPathAccess(auth, env, prefix.replace(/\/+$/, ''));
+        if (guestErr) return guestErr;
+      }
+    }
+
+    // 非游客受限用户：根目录列出允许的文件夹（而非跳转到第一个）
+    if (auth.email && auth.role !== 'guest' && (prefix === '' || prefix === '/')) {
+      const limits = await getUserLimits(env, auth.email);
+      if (limits && limits.allowedFolders && limits.allowedFolders.length > 0) {
+        const allListed = await env.R2_BUCKET.list({ delimiter: '/' });
+        const allowedSet = new Set(limits.allowedFolders.map(f => normalizeFolder(f)));
+
+        const files = [];
+        const folders = [];
+
+        if (allListed.delimitedPrefixes) {
+          for (const folderPath of allListed.delimitedPrefixes) {
+            const name = folderPath.slice(0, -1);
+            if (allowedSet.has(name)) {
+              folders.push({ name, path: '/' + name });
+            }
+          }
+        }
+
+        if (allListed.objects) {
+          for (const obj of allListed.objects) {
+            const name = obj.key;
+            if (!name.includes('/') && allowedSet.has(name)) {
+              const previewType = getPreviewType(name);
+              files.push({
+                name, path: '/' + obj.key, size: obj.size,
+                sizeFormatted: formatFileSize(obj.size),
+                timeFormatted: formatTime(obj.uploaded.toISOString()),
+                lastModified: obj.uploaded.toISOString(), previewType
+              });
+            }
+          }
+        }
+
+        return jsonResponse({ success: true, files, folders, currentPath: '/' });
+      }
+    }
+
+    const accessErr = await checkPathAccess(auth, env, prefix.replace(/\/+$/, ''));
+    if (accessErr) return accessErr;
 
     const listed = await env.R2_BUCKET.list({ prefix, delimiter: '/' });
 
@@ -311,7 +520,7 @@ async function handleSearchFiles(request, env) {
 
   const url = new URL(request.url);
   const query = (url.searchParams.get('q') || '').trim().toLowerCase();
-  const mode = url.searchParams.get('mode') || 'quick';
+  const mode = url.searchParams.get('mode') || 'quick'; // 'quick' or 'full'
   if (!query) return jsonResponse({ success: true, results: [] });
 
   try {
@@ -320,13 +529,30 @@ async function handleSearchFiles(request, env) {
     let pages = 0;
     const maxPages = mode === 'full' ? 9999 : 10;
 
+    // 游客搜索范围：读取一次权限设置
+    let guestAllowedFolders = null;
+    if (auth.role === 'guest') {
+      guestAllowedFolders = await getGuestAllowedFolders(env);
+    }
+
     do {
       pages++;
       const options = cursor ? { cursor, limit: 1000 } : { limit: 1000 };
+      // 游客多文件夹：不设置 prefix，拉全部后在循环里过滤
+      if (guestAllowedFolders && guestAllowedFolders.length === 1) {
+        options.prefix = guestAllowedFolders[0] + '/';
+      }
+
       const listed = await env.R2_BUCKET.list(options);
       if (!listed.objects) break;
 
       for (const obj of listed.objects) {
+        if (guestAllowedFolders) {
+          const hasAccess = guestAllowedFolders.some(norm => {
+            return obj.key.startsWith(norm + '/') || obj.key === norm || obj.key === norm + '/';
+          });
+          if (!hasAccess) continue;
+        }
         const name = obj.key.split('/').pop();
         if (name && name.toLowerCase().includes(query)) {
           const parts = obj.key.split('/');
@@ -354,42 +580,61 @@ async function handleSearchFiles(request, env) {
   }
 }
 
-async function handleFavorites(request, env) {
+async function handleGetFavorites(request, env) {
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
-  const key = 'favorites:admin';
-  if (request.method === 'GET') {
-    const data = await env.KV_STORE.get(key);
-    return jsonResponse({ success: true, favorites: data ? JSON.parse(data) : [] }, 200, { 'Cache-Control': 'private, max-age=5' });
-  }
-  if (request.method === 'POST') {
-    const { name, path } = await request.json();
-    if (!name || !path) return jsonResponse({ success: false, message: '缺少参数' }, 400);
-    const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
-    if (favorites.some(f => f.path === path)) return jsonResponse({ success: false, message: '已在收藏夹中' });
-    favorites.push({ name, path });
+  const data = await env.KV_STORE.get(getFavoritesKey(auth));
+  return jsonResponse({ success: true, favorites: data ? JSON.parse(data) : [] }, 200, { 'Cache-Control': 'private, max-age=5' });
+}
+
+async function handleAddFavorite(request, env) {
+  const auth = await requireAuth(request, env);
+  if (auth instanceof Response) return auth;
+
+  const { name, path } = await request.json();
+  if (!name || !path) return jsonResponse({ success: false, message: '缺少参数' }, 400);
+
+  const key = getFavoritesKey(auth);
+  const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
+  if (favorites.some(f => f.path === path)) return jsonResponse({ success: false, message: '已在收藏夹中' });
+  favorites.push({ name, path });
+  await env.KV_STORE.put(key, JSON.stringify(favorites));
+  return jsonResponse({ success: true, favorites });
+}
+
+async function handleRemoveFavorite(request, env) {
+  const auth = await requireAuth(request, env);
+  if (auth instanceof Response) return auth;
+
+  const index = parseInt(new URL(request.url).searchParams.get('index'));
+  const key = getFavoritesKey(auth);
+  const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
+  if (isNaN(index) || index < 0 || index >= favorites.length) return jsonResponse({ success: false, message: '无效索引' }, 400);
+
+  favorites.splice(index, 1);
+  await env.KV_STORE.put(key, JSON.stringify(favorites));
+  return jsonResponse({ success: true, favorites });
+}
+
+async function handleReorderFavorites(request, env) {
+  const auth = await requireAuth(request, env);
+  if (auth instanceof Response) return auth;
+
+  try {
+    const { favorites } = await request.json();
+    if (!Array.isArray(favorites)) return jsonResponse({ success: false, message: '无效数据' }, 400);
+    const key = getFavoritesKey(auth);
     await env.KV_STORE.put(key, JSON.stringify(favorites));
     return jsonResponse({ success: true, favorites });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '保存顺序失败: ' + e.message }, 500);
   }
-  if (request.method === 'DELETE') {
-    const index = parseInt(new URL(request.url).searchParams.get('index'));
-    const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
-    if (isNaN(index) || index < 0 || index >= favorites.length) return jsonResponse({ success: false, message: '无效索引' }, 400);
-    favorites.splice(index, 1);
-    await env.KV_STORE.put(key, JSON.stringify(favorites));
-    return jsonResponse({ success: true, favorites });
-  }
-  if (request.method === 'PUT') {
-    try {
-      const { favorites } = await request.json();
-      if (!Array.isArray(favorites)) return jsonResponse({ success: false, message: '无效数据' }, 400);
-      await env.KV_STORE.put(key, JSON.stringify(favorites));
-      return jsonResponse({ success: true, favorites });
-    } catch (e) {
-      return jsonResponse({ success: false, message: '保存顺序失败: ' + e.message }, 500);
-    }
-  }
-  return jsonResponse({ success: false, message: '方法不支持' }, 405);
+}
+
+function getFavoritesKey(auth) {
+  if (auth.role === 'guest') return 'favorites:guest';
+  if (auth.role === 'admin') return 'favorites:admin';
+  return 'favorites:user:' + (auth.email || 'unknown');
 }
 
 async function handleUploadFile(request, env, path) {
@@ -401,8 +646,26 @@ async function handleUploadFile(request, env, path) {
     const file = formData.get('file');
     if (!file) return jsonResponse({ success: false, message: '没有上传文件' }, 400);
 
-    let filePath = normalizePath(path);
+    // 从 API 路径中提取真实文件目录
+    const filePathRaw = apiPathToFilePath(path);
+    let filePath = normalizePath(filePathRaw);
     if (filePath && !filePath.endsWith('/')) filePath += '/';
+
+    // 游客上传路径保护：确保落在允许范围内
+    if (auth.role === 'guest') {
+      const allowedFolders = await getGuestAllowedFolders(env);
+      const guestRoot = allowedFolders[0] + '/';
+      if (!filePath.startsWith(guestRoot)) filePath = guestRoot + filePath;
+    } else if (auth.email) {
+      const accessErr = await checkPathAccess(auth, env, filePath);
+      if (accessErr) return accessErr;
+    }
+
+    // 检查上传大小限制
+    const maxSize = await getMaxUploadSize(env, auth);
+    if (maxSize > 0 && file.size > maxSize) {
+      return jsonResponse({ success: false, message: `文件大小超过限制 ${Math.round(maxSize / 1024 / 1024)}MB` }, 400);
+    }
 
     const key = filePath + file.name;
     await env.R2_BUCKET.put(key, file.stream(), {
@@ -419,8 +682,16 @@ async function handleDeleteFile(request, env, path) {
   if (auth instanceof Response) return auth;
 
   try {
-    const key = normalizePath(path);
+    let key = normalizePath(apiPathToFilePath(path));
+
+    const guestErr = await checkPathAccess(auth, env, key);
+    if (guestErr) return guestErr;
+
+    const accessErr = await checkPathAccess(auth, env, key.split('/').slice(0, -1).join('/'));
+    if (accessErr) return accessErr;
+
     await deleteR2Folder(env, key);
+
     return jsonResponse({ success: true, message: '删除成功' });
   } catch (e) {
     return jsonResponse({ success: false, message: '删除失败: ' + e.message }, 500);
@@ -439,7 +710,10 @@ async function handleRenameFile(request, env, path) {
       return jsonResponse({ success: false, message: '请提供新名称' }, 400);
     }
 
-    let oldKey = normalizePath(path);
+    let oldKey = normalizePath(apiPathToFilePath(path));
+
+    const guestErr = await checkPathAccess(auth, env, oldKey);
+    if (guestErr) return guestErr;
 
     const parentPath = oldKey.includes('/') ? oldKey.substring(0, oldKey.lastIndexOf('/') + 1) : '';
     const newKey = parentPath + newName;
@@ -472,7 +746,13 @@ async function handleCreateFolder(request, env) {
 
     if (!folderPath.endsWith('/')) folderPath += '/';
 
-    await env.R2_BUCKET.put(folderPath + '.keep', new Uint8Array(0));
+    const guestErr = await checkPathAccess(auth, env, folderPath);
+    if (guestErr) return guestErr;
+
+    const accessErr = await checkPathAccess(auth, env, folderPath.replace(/\/+$/, ''));
+    if (accessErr) return accessErr;
+
+    await env.R2_BUCKET.put(folderPath + '.folder', new Uint8Array(0));
 
     return jsonResponse({ success: true, message: '文件夹创建成功', path: '/' + folderPath.slice(0, -1) });
   } catch (e) {
@@ -491,6 +771,9 @@ async function handleCreateFile(request, env) {
 
     filePath = normalizePath(filePath);
 
+    const guestErr = await checkPathAccess(auth, env, filePath);
+    if (guestErr) return guestErr;
+
     const existing = await env.R2_BUCKET.get(filePath);
     if (existing) return jsonResponse({ success: false, message: '文件已存在' }, 409);
 
@@ -503,11 +786,11 @@ async function handleCreateFile(request, env) {
 }
 
 async function serveFile(request, env, path, { download = false, cache = false } = {}) {
-  const auth = await requireAuth(request, env);
-  if (auth instanceof Response) return auth;
+  const auth = await verifyAuth(request, env);
+  if (!auth) return jsonResponse({ success: false, message: '未授权' }, 401);
 
   try {
-    let key = normalizePath(path);
+    let key = normalizePath(apiPathToFilePath(path));
     const object = await env.R2_BUCKET.get(key);
     if (!object) return jsonResponse({ success: false, message: '文件不存在' }, 404);
 
@@ -525,10 +808,10 @@ async function serveFile(request, env, path, { download = false, cache = false }
 }
 
 async function handleEditFile(request, env, path) {
-  const auth = await requireAuth(request, env);
-  if (auth instanceof Response) return auth;
+  const auth = await verifyAuth(request, env);
+  if (!auth) return jsonResponse({ success: false, message: '未授权' }, 401);
 
-  const key = normalizePath(path);
+  const key = normalizePath(apiPathToFilePath(path));
 
   if (request.method === 'GET') {
     try {
@@ -555,423 +838,650 @@ async function handleEditFile(request, env, path) {
   return jsonResponse({ success: false, message: '不支持的请求方法' }, 405);
 }
 
+async function handleCreateShare(request, env) {
+  const auth = await requireAuth(request, env);
+  if (auth instanceof Response) return auth;
+  if (auth.role === 'guest') return jsonResponse({ success: false, message: '游客无权创建分享链接' }, 403);
+
+  try {
+    const { filePath, password, expiresIn } = await request.json();
+    if (!filePath) return jsonResponse({ success: false, message: '请提供文件路径' }, 400);
+
+    const key = normalizePath(filePath);
+    const object = await env.R2_BUCKET.head(key);
+    if (!object) return jsonResponse({ success: false, message: '文件不存在' }, 404);
+
+    const shareId = generateId(12);
+    await env.KV_STORE.put(`share:${shareId}`, JSON.stringify({
+      shareId, filePath: key, fileName: key.split('/').pop(), fileSize: object.size,
+      passwordHash: password ? await hashPassword(password) : null,
+      expiresAt: getExpirationTime(expiresIn || '1d'),
+      viewCount: 0, downloadCount: 0, createdAt: Date.now()
+    }));
+    await incrementStat(env, 'stats:totalShares');
+    return jsonResponse({ success: true, shareId, shareUrl: `/s/${shareId}` });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '创建分享链接失败: ' + e.message }, 500);
+  }
+}
+
+async function handleGetShareInfo(request, env, shareId) {
+  try {
+    const raw = await env.KV_STORE.get(`share:${shareId}`);
+    if (!raw) return jsonResponse({ success: false, message: '分享链接不存在' }, 404);
+    const share = JSON.parse(raw);
+    if (share.expiresAt && Date.now() > share.expiresAt) return jsonResponse({ success: false, message: '分享链接已过期' }, 410);
+
+    share.viewCount++;
+    await env.KV_STORE.put(`share:${shareId}`, JSON.stringify(share));
+    await incrementStat(env, 'stats:totalViews');
+
+    return jsonResponse({
+      success: true, fileName: share.fileName, fileSize: share.fileSize,
+      fileSizeFormatted: formatFileSize(share.fileSize),
+      requiresPassword: !!share.passwordHash, expiresAt: share.expiresAt
+    });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '获取分享信息失败: ' + e.message }, 500);
+  }
+}
+
+async function handleShareDownload(request, env, shareId) {
+  try {
+    const raw = await env.KV_STORE.get(`share:${shareId}`);
+    if (!raw) return jsonResponse({ success: false, message: '分享链接不存在' }, 404);
+
+    const share = JSON.parse(raw);
+    if (share.expiresAt && Date.now() > share.expiresAt) {
+      return jsonResponse({ success: false, message: '分享链接已过期' }, 410);
+    }
+
+    if (share.passwordHash) {
+      const { password } = await request.json();
+      if (!password) return jsonResponse({ success: false, message: '请输入密码' }, 401);
+      if (await hashPassword(password) !== share.passwordHash) return jsonResponse({ success: false, message: '密码错误' }, 401);
+    }
+
+    const object = await env.R2_BUCKET.get(share.filePath);
+    if (!object) return jsonResponse({ success: false, message: '文件不存在' }, 404);
+
+    share.downloadCount++;
+    await env.KV_STORE.put(`share:${shareId}`, JSON.stringify(share));
+    await incrementStat(env, 'stats:totalDownloads');
+
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': object.httpMetadata?.contentType || getMimeType(share.fileName),
+        'Content-Disposition': `attachment; filename="${encodeURIComponent(share.fileName)}"`,
+        'Content-Length': object.size
+      }
+    });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '下载失败: ' + e.message }, 500);
+  }
+}
+
+async function handleGetStats(request, env) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+  try {
+    const [totalShares, totalViews, totalDownloads] = await Promise.all([
+      env.KV_STORE.get('stats:totalShares'), env.KV_STORE.get('stats:totalViews'), env.KV_STORE.get('stats:totalDownloads')
+    ]);
+    return jsonResponse({ success: true, totalShares: parseInt(totalShares||'0'), totalViews: parseInt(totalViews||'0'), totalDownloads: parseInt(totalDownloads||'0') });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '获取统计数据失败: ' + e.message }, 500);
+  }
+}
+
+// === 全局设置 ===
+const DEFAULT_SETTINGS = { guestLogin: true, maxUploadSize: 0, webdavEnabled: true, webdavReadOnly: false };
+
+async function getGlobalSettings(env) {
+  const raw = await env.KV_STORE.get('settings:global');
+  if (!raw) return { ...DEFAULT_SETTINGS };
+  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }; } catch { return { ...DEFAULT_SETTINGS }; }
+}
+
+async function handleGetSettings(request, env) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+  try { return jsonResponse({ success: true, settings: await getGlobalSettings(env) }); }
+  catch (e) { return jsonResponse({ success: false, message: '获取设置失败: ' + e.message }, 500); }
+}
+
+async function handleUpdateSettings(request, env) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+  try {
+    const { guestLogin, maxUploadSize, webdavEnabled, webdavReadOnly } = await request.json();
+    const updated = { ...await getGlobalSettings(env) };
+    if (typeof guestLogin === 'boolean') updated.guestLogin = guestLogin;
+    if (typeof maxUploadSize === 'number' && maxUploadSize >= 0) updated.maxUploadSize = maxUploadSize;
+    if (typeof webdavEnabled === 'boolean') updated.webdavEnabled = webdavEnabled;
+    if (typeof webdavReadOnly === 'boolean') updated.webdavReadOnly = webdavReadOnly;
+    await env.KV_STORE.put('settings:global', JSON.stringify(updated));
+    return jsonResponse({ success: true, settings: updated, message: '设置已更新' });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '更新设置失败: ' + e.message }, 500);
+  }
+}
+
+// === 用户权限详情 ===
+const DEFAULT_USER_LIMITS = { role: 'user', maxUploadSize: 0, allowedFolders: [], webdavEnabled: true, webdavReadOnly: false };
+
+async function getUserLimits(env, email) {
+  try {
+    const raw = await env.KV_STORE.get(`settings:user:${email}`);
+    return raw ? { ...DEFAULT_USER_LIMITS, ...JSON.parse(raw) } : null;
+  } catch { return null; }
+}
+
+async function handleGetUserSettings(request, env, email) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+  try { return jsonResponse({ success: true, limits: (await getUserLimits(env, email)) || { ...DEFAULT_USER_LIMITS }, email }); }
+  catch (e) { return jsonResponse({ success: false, message: '获取用户设置失败: ' + e.message }, 500); }
+}
+
+async function handleUpdateUserSettings(request, env, email) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+  try {
+    const { role, maxUploadSize, allowedFolders, webdavEnabled, webdavReadOnly } = await request.json();
+    const isGuest = email === '__guest__';
+    const defaultLimits = isGuest
+      ? { maxUploadSize: 0, allowedFolders: ['guest'], webdavEnabled: true, webdavReadOnly: false }
+      : { ...DEFAULT_USER_LIMITS };
+    const existing = (await getUserLimits(env, email)) || defaultLimits;
+    if (!isGuest && typeof role === 'string' && ['user', 'restricted'].includes(role)) existing.role = role;
+    if (typeof maxUploadSize === 'number' && maxUploadSize >= 0) existing.maxUploadSize = maxUploadSize;
+    if (Array.isArray(allowedFolders)) existing.allowedFolders = allowedFolders.filter(f => typeof f === 'string');
+    if (typeof webdavEnabled === 'boolean') existing.webdavEnabled = webdavEnabled;
+    if (typeof webdavReadOnly === 'boolean') existing.webdavReadOnly = webdavReadOnly;
+    await env.KV_STORE.put(`settings:user:${email}`, JSON.stringify(existing));
+    return jsonResponse({ success: true, limits: existing, message: '用户权限已更新' });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '更新用户设置失败: ' + e.message }, 500);
+  }
+}
+
+async function handleListShares(request, env) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+
+  try {
+    const shares = []; let cursor;
+    do {
+      const listed = await env.KV_STORE.list({ prefix: 'share:', cursor });
+      for (const key of listed.keys) {
+        const data = await env.KV_STORE.get(key.name);
+        if (data) {
+          const s = JSON.parse(data);
+          shares.push({ ...s, fileSizeFormatted: formatFileSize(s.fileSize), isExpired: s.expiresAt && Date.now() > s.expiresAt });
+        }
+      }
+      cursor = listed.list_complete ? null : listed.cursor;
+    } while (cursor);
+    shares.sort((a, b) => b.createdAt - a.createdAt);
+    return jsonResponse({ success: true, shares });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '获取分享列表失败: ' + e.message }, 500);
+  }
+}
+
+async function handleDeleteShare(request, env, shareId) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+  try {
+    await env.KV_STORE.delete(`share:${shareId}`);
+    await incrementStat(env, 'stats:totalShares', -1);
+    return jsonResponse({ success: true, message: '分享链接已删除' });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '删除分享链接失败: ' + e.message }, 500);
+  }
+}
+
+async function handleListUsers(request, env) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+
+  try {
+    const users = []; let cursor;
+    // 添加游客 "用户"，方便在列表查看和管理游客登录状态
+    const settings = await getGlobalSettings(env);
+    users.push({
+      email: '__guest__',
+      role: 'guest',
+      enabled: settings.guestLogin,
+      createdAt: null
+    });
+
+    do {
+      const listed = await env.KV_STORE.list({ prefix: 'user:', cursor });
+      for (const key of listed.keys) {
+        const data = await env.KV_STORE.get(key.name);
+        if (data) {
+          const u = JSON.parse(data);
+          users.push({ email: u.email, role: u.role, createdAt: u.createdAt });
+        }
+      }
+      cursor = listed.list_complete ? null : listed.cursor;
+    } while (cursor);
+    return jsonResponse({ success: true, users });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '获取用户列表失败: ' + e.message }, 500);
+  }
+}
+
+async function handleCreateUser(request, env) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+
+  try {
+    const { email, password } = await request.json();
+    if (!email || !password) return jsonResponse({ success: false, message: '请提供邮箱和密码' }, 400);
+    if (email === '__guest__') return jsonResponse({ success: false, message: '该邮箱为系统保留' }, 400);
+
+    if (await env.KV_STORE.get(`user:${email}`)) return jsonResponse({ success: false, message: '用户已存在' }, 409);
+
+    await env.KV_STORE.put(`user:${email}`, JSON.stringify({
+      email, passwordHash: await hashPassword(password), role: 'user', createdAt: Date.now()
+    }));
+    return jsonResponse({ success: true, message: '用户创建成功', email });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '创建用户失败: ' + e.message }, 500);
+  }
+}
+
+async function handleDeleteUser(request, env, email) {
+  const auth = await requireAdmin(request, env);
+  if (auth instanceof Response) return auth;
+  if (email === '__guest__') return jsonResponse({ success: false, message: '不能删除游客' }, 400);
+  try {
+    await env.KV_STORE.delete(`user:${decodeURIComponent(email)}`);
+    return jsonResponse({ success: true, message: '用户已删除' });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '删除用户失败: ' + e.message }, 500);
+  }
+}
+
 async function handleCheckAuth(request, env) {
   const auth = await verifyAuth(request, env);
   if (!auth) return jsonResponse({ authenticated: false });
-  return jsonResponse({ authenticated: true });
+  return jsonResponse({ authenticated: true, role: auth.role, email: auth.email || null });
 }
 
-function xmlEscape(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
+// === WebDAV ===
 
-function rfc1123Date(d) {
-  return d.toUTCString();
-}
-
-function davXmlResponse(body, status = 207) {
-  const xml = '<?xml version="1.0" encoding="utf-8"?>\n' + body;
-  return new Response(xml, {
-    status,
-    headers: { 'Content-Type': 'application/xml; charset=utf-8' }
-  });
-}
-
-const DAV_CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, HEAD, PUT, DELETE, OPTIONS, PROPFIND, MKCOL, MOVE, COPY, LOCK, UNLOCK',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Depth, Destination, Overwrite, Range',
-  'Access-Control-Expose-Headers': 'Content-Length, Content-Type, ETag, Last-Modified, DAV'
-};
-
-function getDavLockResponse() {
-  return new Response('<?xml version="1.0" encoding="utf-8"?>\n<d:prop xmlns:d="DAV:">\n  <d:lockdiscovery>\n    <d:activelock>\n      <d:locktype><d:write/></d:locktype>\n      <d:lockscope><d:exclusive/></d:lockscope>\n      <d:depth>infinity</d:depth>\n      <d:timeout>Second-3600</d:timeout>\n      <d:locktoken>\n        <d:href>urn:uuid:00000000-0000-0000-0000-000000000000</d:href>\n      </d:locktoken>\n    </d:activelock>\n  </d:lockdiscovery>\n</d:prop>', {
-    status: 200,
-    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Lock-Token': '<urn:uuid:00000000-0000-0000-0000-000000000000>' }
-  });
-}
-
-function withDavCors(res) {
-  const headers = new Headers(res.headers);
-  for (const [k, v] of Object.entries(DAV_CORS)) headers.set(k, v);
-  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
-}
-
-async function verifyDavAuth(request, env) {
-  const authHeader = request.headers.get('Authorization');
-  if (!authHeader || !authHeader.startsWith('Basic ')) {
-    return await verifyAuth(request, env);
-  }
-  const base64 = authHeader.slice(6);
-  let user, pass;
+function parseBasicAuth(request) {
+  const authHeader = request.headers.get('Authorization') || '';
+  if (!authHeader.startsWith('Basic ')) return null;
   try {
-    const decoded = atob(base64);
-    const colon = decoded.indexOf(':');
-    user = decoded.slice(0, colon);
-    pass = decoded.slice(colon + 1);
-  } catch {
-    return null;
-  }
-  if (pass !== env.ADMIN_PASSWORD) return null;
-  return { role: 'admin', user };
-}
-
-function requireDavAuth(request, env, resType = 'json') {
-  if (resType === 'xml') {
-    return davXmlResponse(
-      '<d:error xmlns:d="DAV:"><d:responsedescription>Unauthorized</d:responsedescription></d:error>',
-      401
-    );
-  }
-  return new Response(null, {
-    status: 401,
-    headers: {
-      'WWW-Authenticate': 'Basic realm="EdgeStash WebDAV", charset="UTF-8"',
-      'Content-Type': 'text/plain'
+    const decoded = atob(authHeader.slice(6));
+    const colonIndex = decoded.indexOf(':');
+    if (colonIndex === -1) {
+      return { username: decoded, password: '' };
     }
-  });
+    return { username: decoded.slice(0, colonIndex), password: decoded.slice(colonIndex + 1) };
+  } catch { return null; }
 }
 
-async function handleDavPropfind(request, env, davPath) {
-  const auth = await verifyDavAuth(request, env);
-  if (!auth) return requireDavAuth(request, env, 'xml');
+async function webdavAuth(request, env) {
+  const cookies = parseCookies(request);
+  const token = cookies.token;
+  if (token) {
+    const jwt = await verifyJWT(token, env.ADMIN_PASSWORD);
+    if (jwt) {
+      if (jwt.role === 'user' && jwt.email) {
+        const limits = await getUserLimits(env, jwt.email);
+        if (limits && limits.webdavEnabled === false) return null;
+      }
+      return jwt;
+    }
+  }
+  const basic = parseBasicAuth(request);
+  if (!basic) return null;
+  const settings = await getGlobalSettings(env);
+  if (basic.password === env.ADMIN_PASSWORD) {
+    return { role: 'admin', email: null };
+  }
+  if (basic.username === 'guest') {
+    if (!settings.guestLogin) return null;
+    const guestLimits = await getUserLimits(env, '__guest__');
+    if (guestLimits && guestLimits.webdavEnabled === false) return null;
+    return { role: 'guest' };
+  }
+  const userData = await env.KV_STORE.get(`user:${basic.username}`);
+  if (!userData) return null;
+  const user = JSON.parse(userData);
+  if (user.passwordHash !== await hashPassword(basic.password)) return null;
+  const userLimits = await getUserLimits(env, user.email);
+  if (userLimits && userLimits.webdavEnabled === false) return null;
+  return { role: 'user', email: user.email };
+}
 
+async function isDavReadOnly(settings, auth, env) {
+  if (settings.webdavReadOnly) return true;
+  if (auth.role === 'guest') {
+    const limits = await getUserLimits(env, '__guest__');
+    if (limits && limits.webdavReadOnly) return true;
+  } else if (auth.email) {
+    const limits = await getUserLimits(env, auth.email);
+    if (limits && limits.webdavReadOnly) return true;
+  }
+  return false;
+}
+
+function davXmlEsc(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function fmtRfc1123(d) {
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const date = new Date(d);
+  const pad = n => String(n).padStart(2, '0');
+  return `${days[date.getUTCDay()]}, ${pad(date.getUTCDate())} ${months[date.getUTCMonth()]} ${date.getUTCFullYear()} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} GMT`;
+}
+
+function buildPropstat(href, props, statusCode) {
+  const statusMap = { 200: 'HTTP/1.1 200 OK', 404: 'HTTP/1.1 404 Not Found', 403: 'HTTP/1.1 403 Forbidden' };
+  const s = statusMap[statusCode] || 'HTTP/1.1 200 OK';
+  return `<D:response><D:href>${davXmlEsc(href)}</D:href><D:propstat><D:status>${s}</D:status><D:prop>${props}</D:prop></D:propstat></D:response>`;
+}
+
+async function handleDavPropfind(request, env, davPath, depth, auth) {
+  const responses = [];
+  let prefix = normalizePath(davPath);
+  if (prefix && !prefix.endsWith('/')) prefix += '/';
+  const davBase = request.url.match(/^(https?:\/\/[^/]+)/)[1] + '/dav/';
+  const currentHref = davBase + (davPath || '');
+  const currentHrefSlash = currentHref.endsWith('/') ? currentHref : currentHref + '/';
   try {
-    const depth = request.headers.get('Depth') || 'infinity';
-    const baseUrl = new URL(request.url).origin + '/dav/';
-    const fileObj = davPath ? await env.R2_BUCKET.get(davPath) : null;
+    const key = normalizePath(davPath);
+    const fileObj = await env.R2_BUCKET.head(key);
     if (fileObj) {
-      const name = davPath.split('/').pop();
-      const mtime = fileObj.uploaded || new Date();
-      const xml = `<?xml version="1.0" encoding="utf-8"?>
-<d:multistatus xmlns:d="DAV:">
-  <d:response>
-    <d:href>${xmlEscape(baseUrl + davPath)}</d:href>
-    <d:propstat>
-      <d:prop>
-        <d:displayname>${xmlEscape(name)}</d:displayname>
-        <d:resourcetype/>
-        <d:getlastmodified>${rfc1123Date(new Date(mtime))}</d:getlastmodified>
-        <d:getcontentlength>${fileObj.size || 0}</d:getcontentlength>
-        <d:getetag>"${fileObj.etag || ''}"</d:getetag>
-        <d:getcontenttype>${xmlEscape(fileObj.httpMetadata?.contentType || 'application/octet-stream')}</d:getcontenttype>
-      </d:prop>
-      <d:status>HTTP/1.1 200 OK</d:status>
-    </d:propstat>
-  </d:response>
-</d:multistatus>`;
-      return new Response(xml, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
-    }
-    const prefix = davPath ? davPath + '/' : '';
-    const objects = [];
-    let folders = new Set();
-    let cursor;
-    do {
-      const batch = await env.R2_BUCKET.list({
-        prefix,
-        delimiter: '/',
-        limit: 1000,
-        cursor
-      });
-      if (batch.objects) {
-        for (const obj of batch.objects) {
-          if (obj.key.endsWith('/.keep') || obj.key.endsWith('/.folder')) continue;
-          objects.push(obj);
-        }
-      }
-      if (batch.delimitedPrefixes) {
-        for (const dp of batch.delimitedPrefixes) {
-          const folderName = dp.replace(prefix, '').replace(/\/$/, '');
-          if (folderName) folders.add(folderName);
-        }
-      }
-      cursor = batch.truncated ? batch.cursor : null;
-    } while (cursor);
-
-    let xml = '<d:multistatus xmlns:d="DAV:">\n';
-    xml += `  <d:response>
-    <d:href>${xmlEscape(baseUrl + (davPath ? davPath + '/' : ''))}</d:href>
-    <d:propstat>
-      <d:prop>
-        <d:displayname>${xmlEscape(davPath ? davPath.split('/').pop() : '/')}</d:displayname>
-        <d:resourcetype><d:collection/></d:resourcetype>
-        <d:getlastmodified>${rfc1123Date(new Date())}</d:getlastmodified>
-        <d:getcontentlength>0</d:getcontentlength>
-        <d:getcontenttype>httpd/unix-directory</d:getcontenttype>
-      </d:prop>
-      <d:status>HTTP/1.1 200 OK</d:status>
-    </d:propstat>
-  </d:response>\n`;
-
-    if (depth === '0') {
-      xml += '</d:multistatus>';
-      return davXmlResponse(xml);
-    }
-    for (const folderName of folders) {
-      const folderPath = (davPath ? davPath + '/' : '') + folderName;
-      xml += `  <d:response>
-    <d:href>${xmlEscape(baseUrl + folderPath + '/')}</d:href>
-    <d:propstat>
-      <d:prop>
-        <d:displayname>${xmlEscape(folderName)}</d:displayname>
-        <d:resourcetype><d:collection/></d:resourcetype>
-        <d:getlastmodified>${rfc1123Date(new Date())}</d:getlastmodified>
-        <d:getcontentlength>0</d:getcontentlength>
-        <d:getcontenttype>httpd/unix-directory</d:getcontenttype>
-      </d:prop>
-      <d:status>HTTP/1.1 200 OK</d:status>
-    </d:propstat>
-  </d:response>\n`;
-    }
-    for (const obj of objects) {
-      const objPath = obj.key;
-      const name = objPath.split('/').pop();
-      const href = baseUrl + objPath;
-      const mtime = obj.uploaded || new Date();
-      xml += `  <d:response>
-    <d:href>${xmlEscape(href)}</d:href>
-    <d:propstat>
-      <d:prop>
-        <d:displayname>${xmlEscape(name)}</d:displayname>
-        <d:resourcetype/>
-        <d:getlastmodified>${rfc1123Date(new Date(mtime))}</d:getlastmodified>
-        <d:getcontentlength>${obj.size || 0}</d:getcontentlength>
-        <d:getetag>"${obj.etag || ''}"</d:getetag>
-        <d:getcontenttype>${xmlEscape(obj.httpMetadata?.contentType || 'application/octet-stream')}</d:getcontenttype>
-      </d:prop>
-      <d:status>HTTP/1.1 200 OK</d:status>
-    </d:propstat>
-  </d:response>\n`;
-    }
-
-    xml += '</d:multistatus>';
-    return davXmlResponse(xml);
-
-  } catch (e) {
-    return davXmlResponse(
-      `<d:error xmlns:d="DAV:"><d:responsedescription>${xmlEscape(e.message)}</d:responsedescription></d:error>`,
-      500
-    );
-  }
-}
-async function handleDavGet(request, env, davPath) {
-  const auth = await verifyDavAuth(request, env);
-  if (!auth) return requireDavAuth(request, env);
-
-  try {
-    let key = davPath;
-    const obj = await env.R2_BUCKET.get(key);
-    if (!obj) {
-      const list = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
-      if (list.objects?.length > 0 || list.delimitedPrefixes?.length > 0) {
-        return new Response('Method Not Allowed: GET on collection', { status: 405, headers: { 'Allow': 'OPTIONS,PROPFIND' } });
-      }
-      return new Response('Not Found', { status: 404 });
-    }
-
-    const filename = key.split('/').pop();
-    const rangeHeader = request.headers.get('Range');
-    let objToServe, status, rangeHeaders;
-
-    if (rangeHeader) {
-      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-      if (match) {
-        const start = parseInt(match[1]);
-        const end = match[2] ? parseInt(match[2]) : obj.size - 1;
-        if (start >= obj.size || end >= obj.size) {
-          return new Response('Range Not Satisfiable', { status: 416, headers: { 'Content-Range': `bytes */${obj.size}` } });
-        }
-        objToServe = await env.R2_BUCKET.get(key, { range: { offset: start, length: end - start + 1 } });
-        status = 206;
-        rangeHeaders = {
-          'Content-Range': `bytes ${start}-${end}/${obj.size}`,
-          'Content-Length': end - start + 1,
-        };
-      } else {
-        objToServe = obj;
-        status = 200;
-        rangeHeaders = { 'Content-Length': obj.size };
-      }
+      const props = [
+        '<D:resourcetype/>',
+        `<D:getcontentlength>${fileObj.size}</D:getcontentlength>`,
+        `<D:getlastmodified>${fmtRfc1123(fileObj.uploaded)}</D:getlastmodified>`,
+        `<D:getcontenttype>${fileObj.httpMetadata?.contentType || getMimeType(key.split('/').pop())}</D:getcontenttype>`,
+        `<D:getetag>"${fileObj.httpEtag || fileObj.uploaded.getTime()}"</D:getetag>`
+      ].join('');
+      responses.push(buildPropstat(currentHref, props, 200));
     } else {
-      objToServe = obj;
-      status = 200;
-      rangeHeaders = { 'Content-Length': obj.size };
-    }
-
-    const headers = {
-      'Content-Type': objToServe.httpMetadata?.contentType || obj.httpMetadata?.contentType || getMimeType(filename),
-      'ETag': obj.etag ? `"${obj.etag}"` : '',
-      'Last-Modified': rfc1123Date(new Date(obj.uploaded)),
-      'Accept-Ranges': 'bytes',
-      ...rangeHeaders
-    };
-
-    return new Response(objToServe.body, { status, headers });
-  } catch (e) {
-    return new Response('Internal Server Error: ' + e.message, { status: 500 });
-  }
-}
-async function handleDavHead(request, env, davPath) {
-  const auth = await verifyDavAuth(request, env);
-  if (!auth) return requireDavAuth(request, env);
-
-  try {
-    const key = davPath;
-    const obj = await env.R2_BUCKET.get(key);
-    if (!obj) {
-      const list = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
-      if (list.objects?.length > 0 || list.delimitedPrefixes?.length > 0) {
-        return new Response(null, { status: 200, headers: { 'Content-Type': 'httpd/unix-directory' } });
+      const listed = await env.R2_BUCKET.list({ prefix, delimiter: '/' });
+      const folderProps = [
+        '<D:resourcetype><D:collection/></D:resourcetype>',
+        `<D:getlastmodified>${fmtRfc1123(new Date())}</D:getlastmodified>`
+      ].join('');
+      responses.push(buildPropstat(currentHrefSlash, folderProps, 200));
+      if (depth !== '0') {
+        if (listed.delimitedPrefixes) {
+          for (const fp of listed.delimitedPrefixes) {
+            const name = fp.slice(prefix.length, -1);
+            if (!name) continue;
+            const childHref = currentHrefSlash + name + '/';
+            const childProps = [
+              '<D:resourcetype><D:collection/></D:resourcetype>',
+              `<D:getlastmodified>${fmtRfc1123(new Date())}</D:getlastmodified>`
+            ].join('');
+            responses.push(buildPropstat(childHref, childProps, 200));
+          }
+        }
+        if (listed.objects) {
+          for (const obj of listed.objects) {
+            const name = obj.key.slice(prefix.length);
+            if (!name || name === '.folder' || name.includes('/')) continue;
+            const childHref = currentHrefSlash + name;
+            const childProps = [
+              '<D:resourcetype/>',
+              `<D:getcontentlength>${obj.size}</D:getcontentlength>`,
+              `<D:getlastmodified>${fmtRfc1123(obj.uploaded)}</D:getlastmodified>`,
+              `<D:getcontenttype>${obj.httpMetadata?.contentType || getMimeType(name)}</D:getcontenttype>`,
+              `<D:getetag>"${obj.etag || obj.uploaded.getTime()}"</D:getetag>`
+            ].join('');
+            responses.push(buildPropstat(childHref, childProps, 200));
+          }
+        }
       }
-      return new Response(null, { status: 404 });
     }
-
-    const filename = key.split('/').pop();
-    return new Response(null, {
-      status: 200,
-      headers: {
-        'Content-Type': obj.httpMetadata?.contentType || getMimeType(filename),
-        'Content-Length': obj.size,
-        'ETag': obj.etag ? `"${obj.etag}"` : '',
-        'Last-Modified': rfc1123Date(new Date(obj.uploaded))
-      }
-    });
-  } catch (e) {
-    return new Response(null, { status: 500 });
+  } catch (e) { /* fall through */ }
+  if (responses.length === 0) {
+    return new Response(null, { status: 404 });
   }
+  const body = '<?xml version="1.0" encoding="utf-8"?>\n<D:multistatus xmlns:D="DAV:">\n' + responses.join('\n') + '\n</D:multistatus>';
+  return new Response(body, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8', 'DAV': '1,2' } });
 }
-async function handleDavPut(request, env, davPath) {
-  const auth = await verifyDavAuth(request, env);
-  if (!auth) return requireDavAuth(request, env);
 
+async function handleDavGet(request, env, davPath, auth) {
+  const key = normalizePath(davPath);
+  const object = await env.R2_BUCKET.get(key);
+  if (!object) return new Response('Not Found', { status: 404 });
+  const filename = key.split('/').pop();
+  return new Response(object.body, {
+    headers: {
+      'Content-Type': object.httpMetadata?.contentType || getMimeType(filename),
+      'Content-Length': object.size,
+      'ETag': `"${object.httpEtag || object.uploaded?.getTime() || ''}"`,
+      'Last-Modified': fmtRfc1123(object.uploaded),
+      'Cache-Control': 'no-cache'
+    }
+  });
+}
+
+async function handleDavPut(request, env, davPath, auth) {
+  const settings = await getGlobalSettings(env);
+  if (await isDavReadOnly(settings, auth, env)) {
+    return new Response('WebDAV is in read-only mode', { status: 403 });
+  }
   try {
-    const key = davPath;
-    const overwrite = request.headers.get('Overwrite') !== 'F';
-    const folderCheck = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
-    if (folderCheck.objects?.length > 0 || folderCheck.delimitedPrefixes?.length > 0) {
-      return new Response('Target is a collection', { status: 405 });
+    const maxSize = await getMaxUploadSize(env, auth);
+    const contentLength = parseInt(request.headers.get('Content-Length') || '0');
+    if (maxSize > 0 && contentLength > maxSize) {
+      return new Response(`File size exceeds limit of ${Math.round(maxSize / 1024 / 1024)}MB`, { status: 413 });
     }
-    if (!overwrite) {
-      const existing = await env.R2_BUCKET.head(key);
-      if (existing) return new Response(null, { status: 412 });
+    if (auth.role === 'guest') {
+      const allowedFolders = await getGuestAllowedFolders(env);
+      const guestRoot = allowedFolders[0] + '/';
+      const key = davPath.startsWith('/') ? normalizePath(davPath) : guestRoot + normalizePath(davPath);
+      if (!key.startsWith(guestRoot)) {
+        return new Response('Access denied', { status: 403 });
+      }
+      const contentType = request.headers.get('Content-Type') || getMimeType(key.split('/').pop());
+      await env.R2_BUCKET.put(key, request.body, { httpMetadata: { contentType } });
+      return new Response(null, { status: 201 });
     }
-    const contentType = request.headers.get('Content-Type') || getMimeType(key) || 'application/octet-stream';
-    const existed = await env.R2_BUCKET.head(key);
-    await env.R2_BUCKET.put(key, request.body, {
-      httpMetadata: { contentType }
-    });
-    return new Response(null, { status: existed ? 204 : 201 });
+    if (auth.email) {
+      const accessErr = await checkPathAccess(auth, env, normalizePath(davPath));
+      if (accessErr) return new Response('Access denied', { status: 403 });
+    }
+    const key = normalizePath(davPath);
+    const contentType = request.headers.get('Content-Type') || getMimeType(key.split('/').pop());
+    await env.R2_BUCKET.put(key, request.body, { httpMetadata: { contentType } });
+    return new Response(null, { status: 201 });
   } catch (e) {
     return new Response('Upload failed: ' + e.message, { status: 500 });
   }
 }
-async function handleDavDelete(request, env, davPath) {
-  const auth = await verifyDavAuth(request, env);
-  if (!auth) return requireDavAuth(request, env);
 
+async function handleDavDelete(request, env, davPath, auth) {
+  const settings = await getGlobalSettings(env);
+  if (await isDavReadOnly(settings, auth, env)) {
+    return new Response('WebDAV is in read-only mode', { status: 403 });
+  }
   try {
-    const obj = await env.R2_BUCKET.get(davPath);
-    const list = await env.R2_BUCKET.list({ prefix: davPath + '/', delimiter: '/', limit: 1 });
-    const exists = obj || (list.objects?.length > 0 || list.delimitedPrefixes?.length > 0);
-    if (!exists) return new Response(null, { status: 404 });
-    await deleteR2Folder(env, davPath);
+    const key = normalizePath(davPath);
+    if (auth.role === 'guest' || auth.email) {
+      const accessErr = await checkPathAccess(auth, env, key);
+      if (accessErr) return new Response('Access denied', { status: 403 });
+    }
+    await deleteR2Folder(env, key);
     return new Response(null, { status: 204 });
   } catch (e) {
     return new Response('Delete failed: ' + e.message, { status: 500 });
   }
 }
-async function handleDavMkcol(request, env, davPath) {
-  const auth = await verifyDavAuth(request, env);
-  if (!auth) return requireDavAuth(request, env);
 
+async function handleDavMkcol(request, env, davPath, auth) {
+  const settings = await getGlobalSettings(env);
+  if (await isDavReadOnly(settings, auth, env)) {
+    return new Response('WebDAV is in read-only mode', { status: 403 });
+  }
   try {
-    const key = davPath;
-    const existing = await env.R2_BUCKET.get(key);
-    if (existing) {
-      return new Response(null, { status: 405, headers: { 'Allow': 'GET,OPTIONS,PROPFIND' } });
+    let folderPath = normalizePath(davPath);
+    if (!folderPath) return new Response('Invalid path', { status: 400 });
+    if (!folderPath.endsWith('/')) folderPath += '/';
+    if (auth.role === 'guest' || auth.email) {
+      const accessErr = await checkPathAccess(auth, env, folderPath.replace(/\/+$/, ''));
+      if (accessErr) return new Response('Access denied', { status: 403 });
     }
-    const existingDir = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
-    if (existingDir.objects?.length > 0 || existingDir.delimitedPrefixes?.length > 0) {
-      return new Response(null, { status: 405, headers: { 'Allow': 'GET,OPTIONS,PROPFIND,DELETE' } });
+    const existing = await env.R2_BUCKET.list({ prefix: folderPath, limit: 1 });
+    if ((existing.objects && existing.objects.length > 0) || (existing.delimitedPrefixes && existing.delimitedPrefixes.length > 0)) {
+      return new Response('Collection already exists', { status: 405 });
     }
-    const keepKey = key + '/.keep';
-    await env.R2_BUCKET.put(keepKey, '', {
-      httpMetadata: { contentType: 'text/plain' }
-    });
+    await env.R2_BUCKET.put(folderPath + '.folder', new Uint8Array(0));
     return new Response(null, { status: 201 });
   } catch (e) {
     return new Response('MKCOL failed: ' + e.message, { status: 500 });
   }
 }
-async function handleDavMove(request, env, davPath) {
-  const auth = await verifyDavAuth(request, env);
-  if (!auth) return requireDavAuth(request, env);
 
+async function handleDavMove(request, env, davPath, auth) {
+  const settings = await getGlobalSettings(env);
+  if (await isDavReadOnly(settings, auth, env)) {
+    return new Response('WebDAV is in read-only mode', { status: 403 });
+  }
+  const parsed = await parseDavDestination(request, davPath, auth, env, true);
+  if (parsed instanceof Response) return parsed;
+  const { srcKey, dstKey } = parsed;
   try {
-    const parsed = await parseDavDestination(request, davPath);
-    if (parsed instanceof Response) return parsed;
-    const { srcKey, dstKey } = parsed;
-
     const overwrite = request.headers.get('Overwrite') !== 'F';
-
+    const destExists = await env.R2_BUCKET.head(dstKey);
+    if (destExists && !overwrite) {
+      return new Response('Destination already exists', { status: 412 });
+    }
     const srcObj = await env.R2_BUCKET.get(srcKey);
     if (!srcObj) {
-      const srcCheck = await env.R2_BUCKET.list({ prefix: srcKey + '/', delimiter: '/', limit: 1 });
-      if (!srcCheck.objects?.length && !srcCheck.delimitedPrefixes?.length) {
-        return new Response('Not Found', { status: 404 });
+      const folderCheck = await env.R2_BUCKET.list({ prefix: srcKey + '/', limit: 1 });
+      if (folderCheck.objects && folderCheck.objects.length > 0) {
+        await copyR2Folder(env, srcKey, dstKey);
+        await deleteR2Folder(env, srcKey);
+        return new Response(null, { status: 204 });
       }
-      await copyR2Folder(env, srcKey, dstKey);
-      await deleteR2Folder(env, srcKey);
-      return new Response(null, { status: 201 });
-    }
-    if (!overwrite) {
-      const destExists = await env.R2_BUCKET.get(dstKey);
-      if (destExists) return new Response(null, { status: 412 });
+      return new Response('Source not found', { status: 404 });
     }
     await env.R2_BUCKET.put(dstKey, srcObj.body, { httpMetadata: srcObj.httpMetadata });
     await env.R2_BUCKET.delete(srcKey);
-    return new Response(null, { status: 201 });
+    return new Response(null, { status: destExists ? 204 : 201 });
   } catch (e) {
     return new Response('MOVE failed: ' + e.message, { status: 500 });
   }
 }
-async function handleDavCopy(request, env, davPath) {
-  const auth = await verifyDavAuth(request, env);
-  if (!auth) return requireDavAuth(request, env);
 
+async function handleDavCopy(request, env, davPath, auth) {
+  const settings = await getGlobalSettings(env);
+  if (await isDavReadOnly(settings, auth, env)) {
+    return new Response('WebDAV is in read-only mode', { status: 403 });
+  }
+  const parsed = await parseDavDestination(request, davPath, auth, env, false);
+  if (parsed instanceof Response) return parsed;
+  const { srcKey, dstKey } = parsed;
   try {
-    const parsed = await parseDavDestination(request, davPath);
-    if (parsed instanceof Response) return parsed;
-    const { srcKey, dstKey } = parsed;
-
     const overwrite = request.headers.get('Overwrite') !== 'F';
-    const depth = request.headers.get('Depth') || 'infinity';
-
-    const srcObj = await env.R2_BUCKET.get(srcKey);
-
-    if (srcObj) {
-      if (!overwrite) {
-        const destExists = await env.R2_BUCKET.get(dstKey);
-        if (destExists) return new Response(null, { status: 412 });
-      }
-      await env.R2_BUCKET.put(dstKey, srcObj.body, { httpMetadata: srcObj.httpMetadata });
-      return new Response(null, { status: 201 });
+    if (!overwrite) {
+      const destExists = await env.R2_BUCKET.head(dstKey);
+      if (destExists) return new Response('Destination already exists', { status: 412 });
     }
-    const srcList = await env.R2_BUCKET.list({ prefix: srcKey + '/', limit: 1 });
-    if (srcList.objects?.length > 0 || srcList.delimitedPrefixes?.length > 0) {
-      if (depth === '0') {
-        await env.R2_BUCKET.put(dstKey + '/.keep', '', { httpMetadata: { contentType: 'text/plain' } });
+    const srcObj = await env.R2_BUCKET.get(srcKey);
+    if (!srcObj) {
+      const folderCheck = await env.R2_BUCKET.list({ prefix: srcKey + '/', limit: 1 });
+      if (folderCheck.objects && folderCheck.objects.length > 0) {
+        await copyR2Folder(env, srcKey, dstKey);
         return new Response(null, { status: 201 });
       }
-      await copyR2Folder(env, srcKey, dstKey);
-      return new Response(null, { status: 201 });
+      return new Response('Source not found', { status: 404 });
     }
-
-    return new Response('Not Found', { status: 404 });
+    await env.R2_BUCKET.put(dstKey, srcObj.body, { httpMetadata: srcObj.httpMetadata });
+    return new Response(null, { status: 201 });
   } catch (e) {
     return new Response('COPY failed: ' + e.message, { status: 500 });
   }
 }
+
+function handleDavLock(request, env, davPath) {
+  const lockToken = 'opaquelocktoken:' + generateId(16);
+  const body = '<?xml version="1.0" encoding="utf-8"?>\n<D:prop xmlns:D="DAV:">\n<D:lockdiscovery>\n<D:activelock>\n<D:locktype><D:write/></D:locktype>\n<D:lockscope><D:exclusive/></D:lockscope>\n<D:depth>infinity</D:depth>\n<D:timeout>Second-3600</D:timeout>\n<D:locktoken><D:href>' + davXmlEsc(lockToken) + '</D:href></D:locktoken>\n</D:activelock>\n</D:lockdiscovery>\n</D:prop>';
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Lock-Token': '<' + lockToken + '>' } });
+}
+
+function handleDavUnlock(request, env, davPath) {
+  return new Response(null, { status: 204 });
+}
+
+async function handleWebDAV(request, env) {
+  const url = new URL(request.url);
+  const method = request.method.toUpperCase();
+  let davPath = decodeURIComponent(url.pathname.replace(/^\/dav\/?/, ''));
+  if (!davPath) davPath = '';
+
+  if (method === 'OPTIONS') {
+    return new Response(null, {
+      status: 200,
+      headers: {
+        'Allow': 'OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY, LOCK, UNLOCK',
+        'DAV': '1,2',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY, LOCK, UNLOCK',
+        'Access-Control-Allow-Headers': 'Authorization, Content-Type, Depth, Destination, Overwrite, If, Lock-Token',
+        'Access-Control-Expose-Headers': 'DAV, Lock-Token'
+      }
+    });
+  }
+
+  const auth = await webdavAuth(request, env);
+  if (!auth) {
+    return new Response('Unauthorized', { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="WebDAV"', 'Content-Type': 'text/plain' } });
+  }
+
+  const settings = await getGlobalSettings(env);
+  if (!settings.webdavEnabled) {
+    return new Response('WebDAV is disabled', { status: 403 });
+  }
+
+  switch (method) {
+    case 'GET':
+    case 'HEAD': {
+      const response = await handleDavGet(request, env, davPath, auth);
+      if (method === 'HEAD') {
+        return new Response(null, { status: response.status, headers: response.headers });
+      }
+      return response;
+    }
+    case 'PUT':
+      return await handleDavPut(request, env, davPath, auth);
+    case 'DELETE':
+      return await handleDavDelete(request, env, davPath, auth);
+    case 'PROPFIND': {
+      const depthHeader = request.headers.get('Depth') || 'infinity';
+      return await handleDavPropfind(request, env, davPath, depthHeader, auth);
+    }
+    case 'MKCOL':
+      return await handleDavMkcol(request, env, davPath, auth);
+    case 'MOVE':
+      return await handleDavMove(request, env, davPath, auth);
+    case 'COPY':
+      return await handleDavCopy(request, env, davPath, auth);
+    case 'LOCK':
+      return handleDavLock(request, env, davPath);
+    case 'UNLOCK':
+      return handleDavUnlock(request, env, davPath);
+    default:
+      return new Response('Method Not Allowed', { status: 405 });
+  }
+}
+
 const CSS_STYLES = `
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1000,6 +1510,7 @@ const CSS_STYLES = `
     --blur: saturate(180%) blur(20px);
     --transition: 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
   }
+
   [data-theme="dark"] {
     --primary: #0A84FF;
     --primary-hover: #409cff;
@@ -1015,6 +1526,8 @@ const CSS_STYLES = `
     --shadow: 0 2px 8px rgba(0,0,0,0.5);
     --shadow-lg: 0 8px 30px rgba(0,0,0,0.6);
   }
+
+  /* Theme Toggle Button */
   .theme-toggle {
     background: none; border: 1px solid var(--border); border-radius: 50%;
     width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
@@ -1022,11 +1535,14 @@ const CSS_STYLES = `
     flex-shrink: 0;
   }
   .theme-toggle:hover { background: var(--surface-hover); }
+
+  /* Dark Mode Overrides */
   [data-theme="dark"] .header { background: rgba(28,28,30,0.72); }
   [data-theme="dark"] .btn-secondary { background: rgba(255,255,255,0.08); }
   [data-theme="dark"] .btn-secondary:hover { background: rgba(255,255,255,0.14); }
   [data-theme="dark"] .login-container { background: #000; }
-  [data-theme="dark"] .preview-text, [data-theme="dark"] .preview-markdown { background: #2c2c2e; color: #f5f5f7; }
+  [data-theme="dark"] .preview-text { background: #2c2c2e; color: #f5f5f7; }
+  [data-theme="dark"] .preview-markdown { background: #2c2c2e; color: #f5f5f7; }
   [data-theme="dark"] .preview-markdown code { background: rgba(255,255,255,0.08); }
   [data-theme="dark"] .loading-overlay { background: rgba(0,0,0,0.5); }
   [data-theme="dark"] .view-toggle { background: rgba(255,255,255,0.06); }
@@ -1073,6 +1589,8 @@ const CSS_STYLES = `
   .sidebar-divider { height: 1px; background: var(--border); margin: 8px 12px; }
   .main-content { flex: 1; min-width: 0; }
   .container { padding: 0; }
+
+  /* Buttons */
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
     padding: 8px 18px; border: none; border-radius: var(--radius-sm);
@@ -1100,6 +1618,8 @@ const CSS_STYLES = `
     background: #e0352b;
   }
   .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+  /* Forms */
   .form-group { margin-bottom: 18px; }
   .form-label {
     display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500;
@@ -1116,11 +1636,30 @@ const CSS_STYLES = `
     box-shadow: 0 0 0 3px rgba(0,122,255,0.15);
   }
   .form-select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2386868b' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 36px; }
+  .form-help { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  /* Toggle Switch */
+  .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider {
+    position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--border); border-radius: 24px; transition: 0.3s;
+  }
+  .toggle-slider:before {
+    content: ''; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px;
+    background: white; border-radius: 50%; transition: 0.3s;
+  }
+  .toggle-switch input:checked + .toggle-slider { background: var(--primary); }
+  .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
+
+  /* Cards */
   .card {
     padding: 0; position: relative;
   }
   .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
   .card-title { font-size: 18px; font-weight: 600; }
+
+  /* Header */
   .header {
     background: rgba(255,255,255,0.72); backdrop-filter: var(--blur);
     -webkit-backdrop-filter: var(--blur);
@@ -1133,6 +1672,8 @@ const CSS_STYLES = `
     letter-spacing: -0.02em;
   }
   .header-actions { display: flex; gap: 8px; }
+
+  /* Search */
   .search-group { display: flex; align-items: stretch; flex: 1; max-width: 420px; margin: 0 16px; position: relative; }
   .search-box { position: relative; flex: 1; }
   .search-input {
@@ -1181,6 +1722,8 @@ const CSS_STYLES = `
   .search-result-size { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
   .search-empty { padding: 16px; text-align: center; color: var(--text-muted); font-size: 13px; }
   .search-result-name mark { background: rgba(0,122,255,0.15); color: var(--primary); font-weight: 600; border-radius: 2px; padding: 0 1px; }
+
+  /* Breadcrumb */
   .breadcrumb {
     display: flex; align-items: center; gap: 2px;
     padding: 4px 0; flex-wrap: wrap; font-size: 14px;
@@ -1189,6 +1732,8 @@ const CSS_STYLES = `
   .breadcrumb-item:hover { color: var(--primary); }
   .breadcrumb-item.active { color: var(--text); font-weight: 500; }
   .breadcrumb-separator { color: var(--border-strong); margin: 0 2px; }
+
+  /* Nav Buttons (Back/Forward) */
   .nav-btn {
     width: 26px; height: 26px; border: 1px solid var(--border);
     border-radius: var(--radius-sm); background: var(--surface);
@@ -1198,6 +1743,8 @@ const CSS_STYLES = `
   }
   .nav-btn:hover:not(:disabled) { background: rgba(0,122,255,0.1); color: var(--primary); border-color: var(--primary); }
   .nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* File Grid */
   .file-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 8px; min-height: 200px; position: relative;
@@ -1241,6 +1788,8 @@ const CSS_STYLES = `
   .file-meta {
     font-size: 11px; color: var(--text-muted); text-align: center;
   }
+
+  /* View Toggle */
   .view-toggle {
     display: flex; background: rgba(0,0,0,0.04); border-radius: var(--radius-sm);
     overflow: hidden;
@@ -1252,6 +1801,8 @@ const CSS_STYLES = `
   }
   .view-toggle-btn:hover { color: var(--text); }
   .view-toggle-btn.active { background: var(--primary); color: #fff; }
+
+  /* List View */
   .file-list { display: block !important; min-height: auto; }
   .file-list .file-item {
     display: grid; grid-template-columns: 36px 1fr 100px 80px 70px; align-items: center;
@@ -1273,6 +1824,8 @@ const CSS_STYLES = `
   .sortable-header { transition: color var(--transition); }
   .sortable-header:hover { color: var(--primary); }
   .sortable-header.active { color: var(--primary); }
+
+  /* Toolbar */
   .toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
   .selection-info {
     margin-left: auto; padding: 6px 14px; background: var(--primary);
@@ -1280,6 +1833,8 @@ const CSS_STYLES = `
     display: none; animation: fadeIn 0.2s ease;
   }
   .selection-info.active { display: inline-block; }
+
+  /* Modal */
   .modal-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.3); backdrop-filter: blur(4px);
@@ -1304,6 +1859,8 @@ const CSS_STYLES = `
     align-items: center; justify-content: center; transition: all var(--transition);
   }
   .modal-close:hover { background: rgba(0,0,0,0.06); color: var(--text); }
+
+  /* Preview */
   .preview-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.92); display: flex; flex-direction: column;
@@ -1350,6 +1907,8 @@ const CSS_STYLES = `
   .preview-markdown th, .preview-markdown td { border: 1px solid var(--border); padding: 8px 12px; }
   .preview-loading { display: flex; flex-direction: column; align-items: center; gap: 16px; color: rgba(255,255,255,0.8); }
   .preview-error { text-align: center; color: var(--error); }
+
+  /* Toast */
   .toast-container { position: fixed; top: 20px; right: 20px; z-index: 3000; display: flex; flex-direction: column; gap: 8px; }
   .toast {
     padding: 14px 18px; border-radius: var(--radius-sm); color: #fff; font-size: 14px;
@@ -1365,6 +1924,17 @@ const CSS_STYLES = `
   @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes selectPulse { 0% { background: rgba(0,122,255,0.08); } 50% { background: rgba(0,122,255,0.25); } 100% { background: transparent; } }
+
+  /* Stats */
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 30px; }
+  .stat-card {
+    background: var(--surface); border-radius: var(--radius-lg); padding: 28px 24px;
+    text-align: center; border: 1px solid var(--border); box-shadow: var(--shadow-sm);
+  }
+  .stat-value { font-size: 40px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; }
+  .stat-label { color: var(--text-muted); font-size: 13px; margin-top: 6px; }
+
+  /* Tabs */
   .tabs {
     display: flex; gap: 4px; background: rgba(0,0,0,0.04); padding: 4px;
     border-radius: var(--radius); margin-bottom: 24px;
@@ -1379,18 +1949,31 @@ const CSS_STYLES = `
   .tab:hover:not(.active) { color: var(--text); }
   .tab-content { display: none; }
   .tab-content.active { display: block; animation: fadeIn 0.25s ease; }
+
+  /* Badge */
   .badge {
     display: inline-block; padding: 3px 8px; border-radius: 12px;
     font-size: 11px; font-weight: 600;
   }
   .badge-success { background: rgba(52,199,89,0.12); color: var(--success); }
+  .badge-warning { background: rgba(255,149,0,0.12); color: var(--warning); }
   .badge-error { background: rgba(255,59,48,0.12); color: var(--error); }
   .badge-info { background: rgba(0,122,255,0.12); color: var(--primary); }
+  .badge-guest { background: rgba(175,82,222,0.12); color: #af52de; }
+
+  /* Table */
+  .table-container { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { font-weight: 600; color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:hover { background: var(--surface-hover); }
+
+  /* Login/Share container */
   .login-container {
     min-height: 100vh; display: flex; align-items: center; justify-content: center;
     background: linear-gradient(180deg, #f5f5f7 0%, #e8e8ed 100%); padding: 20px;
   }
-  .login-card {
+  .login-card, .share-card {
     background: var(--surface); border-radius: var(--radius-xl);
     padding: 40px; width: 100%; max-width: 420px;
     box-shadow: var(--shadow-lg); border: 1px solid var(--border);
@@ -1398,8 +1981,20 @@ const CSS_STYLES = `
   .login-header { text-align: center; margin-bottom: 32px; }
   .login-logo { font-size: 28px; font-weight: 700; color: var(--text); margin-bottom: 4px; letter-spacing: -0.02em; }
   .login-subtitle { color: var(--text-muted); font-size: 15px; }
+
+  .share-card {
+    max-width: 480px; text-align: center;
+  }
+  .share-icon { font-size: 56px; margin-bottom: 16px; }
+  .share-filename { font-size: 18px; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
+  .share-filesize { color: var(--text-muted); margin-bottom: 24px; }
+  .share-expired { color: var(--error); font-size: 16px; }
+
+  /* Empty State */
   .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
   .empty-icon { font-size: 56px; margin-bottom: 12px; opacity: 0.4; }
+
+  /* Loading */
   .spinner {
     width: 36px; height: 36px; border: 3px solid rgba(0,0,0,0.08);
     border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite;
@@ -1411,6 +2006,8 @@ const CSS_STYLES = `
     -webkit-backdrop-filter: blur(4px);
     display: flex; align-items: center; justify-content: center; z-index: 3000;
   }
+
+  /* Upload */
   .upload-overlay {
     position: absolute; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,122,255,0.06); border: 2px dashed var(--primary);
@@ -1442,6 +2039,8 @@ const CSS_STYLES = `
   .upload-progress-info { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--text-muted); }
   .upload-progress-filename { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .upload-progress-percentage { font-weight: 600; color: var(--primary); }
+
+  /* Context Menu */
   .context-menu {
     position: fixed; background: rgba(255,255,255,0.95);
     backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
@@ -1458,6 +2057,8 @@ const CSS_STYLES = `
   .context-menu-item:hover { background: rgba(0,122,255,0.06); color: var(--primary); }
   .context-menu-item.danger:hover { background: rgba(255,59,48,0.06); color: var(--error); }
   .context-menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+  /* Ace Editor */
   .editor-tool-btn {
     background: none; border: none; color: #86868b; cursor: pointer;
     font-size: 13px; padding: 3px 7px; border-radius: 4px; line-height: 1;
@@ -1495,6 +2096,10 @@ const CSS_STYLES = `
     position: absolute; right: 0; bottom: 20px; width: 14px; height: 14px;
     cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #555 50%); z-index: 2;
   }
+
+  /* Responsive */
+
+  /* Mobile sidebar toggle – hidden on desktop */
   .sidebar-toggle { display: none; }
   .sidebar-backdrop { display: none; }
   .mobile-upload-bar { display: none; }
@@ -1503,17 +2108,21 @@ const CSS_STYLES = `
     html { font-size: 15px; }
     body { -webkit-tap-highlight-color: transparent; }
 
+    /* Header – stack + compact */
     .header { padding: 10px 14px; gap: 8px; flex-wrap: wrap; }
     .logo { font-size: 18px; white-space: nowrap; }
     .search-group { max-width: 100%; width: 100%; margin: 0; order: 3; }
     .header-actions { width: auto; gap: 4px; }
     .header-actions .btn { padding: 6px 12px; font-size: 12px; }
+    #adminBtn { display: none; }
+
+    /* Sidebar – hide by default, toggle via JS */
     .sidebar {
       position: fixed; top: 0; left: 0; bottom: 0; z-index: 500;
       width: 260px; background: var(--surface); box-shadow: var(--shadow-lg);
       flex-direction: column; padding: 60px 12px 20px; gap: 2px;
       transform: translateX(-100%); transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
-      overflow-y: auto;
+      overflow-y: auto; border-right: 1px solid var(--border);
     }
     .sidebar.open { transform: translateX(0); }
     .sidebar-title { display: block; padding: 12px 8px 6px; font-size: 11px; }
@@ -1525,6 +2134,8 @@ const CSS_STYLES = `
       background: rgba(0,0,0,0.3); backdrop-filter: blur(2px);
     }
     .sidebar-backdrop.active { display: block; }
+
+    /* Hamburger menu button */
     .sidebar-toggle {
       display: flex; width: 36px; height: 36px; border: 1px solid var(--border);
       border-radius: var(--radius-sm); background: var(--surface);
@@ -1536,12 +2147,20 @@ const CSS_STYLES = `
 
     .main-layout { flex-direction: column; padding: 0; gap: 0; }
     .main-content { width: 100%; }
+
+    /* Toolbar – hidden on mobile */
     .toolbar { display: none; }
+
+    /* Container */
     .container { padding: 0; }
+
+    /* File grid – 2 columns for mobile */
     .file-grid:not(.file-list) { grid-template-columns: repeat(2, 1fr); gap: 4px; min-height: 100px; }
     .file-item { padding: 5px 4px; gap: 1px; }
     .file-item .file-icon { font-size: 28px; }
     .file-item .file-name { font-size: 18px; line-height: 1.3; }
+
+    /* List view */
     .file-list .file-item { grid-template-columns: 40px 1fr 68px 50px; gap: 8px; padding: 8px 10px; align-items: center; }
     .file-list-header { grid-template-columns: 40px 1fr 68px 50px; gap: 8px; padding: 4px 10px; font-size: 12px; }
     .file-list .file-icon { font-size: 28px; flex-shrink: 0; }
@@ -1550,7 +2169,11 @@ const CSS_STYLES = `
     .file-list .file-meta:last-child { display: none; }
     .file-list-header > *:nth-child(4) { text-align: right; }
     .file-list-header > *:nth-child(5) { display: none; }
+
+    /* Breadcrumb */
     .breadcrumb { font-size: 12px; padding: 4px 12px; }
+
+    /* Modals */
     .modal { padding: 20px; width: 94%; max-width: 100%; border-radius: var(--radius-lg); }
     .modal-title { font-size: 16px; }
     .modal-overlay { align-items: flex-end; }
@@ -1558,16 +2181,38 @@ const CSS_STYLES = `
       border-radius: var(--radius-xl) var(--radius-xl) 0 0;
       max-height: 90vh; margin-bottom: 0;
     }
-    .login-card { padding: 28px 20px; max-width: 100%; margin: 0 8px; border-radius: var(--radius-lg); }
+
+    /* Login / Share cards */
+    .login-card, .share-card { padding: 28px 20px; max-width: 100%; margin: 0 8px; border-radius: var(--radius-lg); }
     .login-container { padding: 12px; align-items: flex-start; padding-top: 10vh; }
+
+    /* Preview overlay */
     .preview-header { padding: 10px 14px; gap: 8px; }
     .preview-filename { font-size: 14px; }
     .preview-overlay .btn { padding: 6px 12px; font-size: 12px; }
+
+    /* Admin page */
+    .stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .stat-card { padding: 18px 12px; }
+    .stat-value { font-size: 28px; }
+    .stat-label { font-size: 12px; }
+
+    /* Admin tables */
+    .table-container { margin: 0 -8px; }
+    th, td { padding: 8px 10px; font-size: 12px; white-space: nowrap; }
+
+    /* Buttons – touch friendly */
     .btn { min-height: 40px; }
     .btn-sm { min-height: 32px; padding: 4px 10px; font-size: 11px; }
     .modal-close { width: 36px; height: 36px; font-size: 24px; }
+
+    /* Form inputs */
     .form-input, .form-select { padding: 10px 12px; font-size: 16px; }
+
+    /* Card – full width */
     .card { padding: 12px 8px; border-radius: 0; border: none; box-shadow: none; }
+
+    /* Footer upload bar (fixed bottom) */
     .mobile-upload-bar {
       display: flex; position: fixed; bottom: 0; left: 0; right: 0;
       padding: 10px 14px; padding-bottom: max(10px, env(safe-area-inset-bottom));
@@ -1578,7 +2223,8 @@ const CSS_STYLES = `
     .mobile-upload-bar .btn { flex: 1; }
   }
 
-</style>`;
+</style>
+`;
 
 const SHARED_SCRIPTS = 
 `    function showToast(message, type = 'info') {
@@ -1588,6 +2234,11 @@ const SHARED_SCRIPTS =
       toast.textContent = message;
       container.appendChild(toast);
       setTimeout(() => toast.remove(), 3000);
+    }
+
+    function closeUploadProgress() {
+      const container = document.getElementById('uploadProgressContainer');
+      if (container) container.classList.remove('active');
     }
 
     function closeModal(id) {
@@ -1648,7 +2299,7 @@ const LOGIN_PAGE = `
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>登录</title>
+  <title>登录 - 网盘</title>
   <script>(function(){var t=localStorage.getItem('theme')||'dark';document.documentElement.setAttribute('data-theme',t)})()</script>
   ${CSS_STYLES}
 </head>
@@ -1656,32 +2307,111 @@ const LOGIN_PAGE = `
   <div class="login-container">
     <button class="theme-toggle" onclick="toggleTheme()" title="切换主题" style="position:fixed;top:16px;right:16px;z-index:10;"></button>
     <div class="login-card">
-      <form onsubmit="return handleLogin(event)">
-        <input type="text" class="form-input" placeholder="账号" style="margin-bottom:12px">
-        <input type="password" id="password" class="form-input" placeholder="密码" autofocus style="margin-bottom:16px">
-        <button type="submit" class="btn btn-primary" style="width:100%;" id="loginBtn">登录</button>
+      <div class="login-header">
+        <div class="login-logo">网盘</div>
+        <div class="login-subtitle">登录</div>
+      </div>
+
+      <form id="loginForm" onsubmit="handleLogin(event)">
+        <div class="form-group">
+          <label class="form-label">邮箱</label>
+          <input type="email" id="email" class="form-input" placeholder="请输入邮箱" required pattern="[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">密码</label>
+          <input type="password" id="password" class="form-input" placeholder="请输入密码">
+        </div>
+
+        <div class="form-group" style="text-align:right;">
+          <a href="#" style="font-size:13px;color:#888;text-decoration:none;" onclick="showToast('请联系管理员重置密码','info');return false;">忘记密码</a>
+        </div>
+
+        <button type="submit" class="btn btn-primary" style="width: 100%;" id="loginBtn">
+          登录
+        </button>
       </form>
+
+      <button type="button" class="btn" style="width:100%;margin-top:12px;border:1px solid #4a90d9;color:#4a90d9;background:transparent;" id="guestLoginBtn" onclick="handleGuestLogin()">
+        游客登录 &rarr;
+      </button>
     </div>
   </div>
+
   <div class="toast-container" id="toastContainer"></div>
+
   <script>
-    function toast(m,t){var e=document.getElementById('toastContainer'),n=document.createElement('div');n.className='toast toast-'+(t||'info');n.textContent=m;e.appendChild(n);setTimeout(function(){n.remove()},3000)}
-    function toggleTheme(){var h=document.documentElement,c=h.getAttribute('data-theme')||'light',n=c==='dark'?'light':'dark';h.setAttribute('data-theme',n);localStorage.setItem('theme',n);document.querySelectorAll('.theme-toggle').forEach(function(b){b.textContent=n==='dark'?'☀️':'🌙'})}
-    (function(){var b=document.querySelector('.theme-toggle');if(b)b.textContent=(document.documentElement.getAttribute('data-theme')==='dark')?'☀️':'🌙'})();
-    async function handleLogin(e){
+    function handleLogin(e) {
       e.preventDefault();
-      var p=document.getElementById('password').value;
-      if(!p)return toast('请输入密码','error');
-      var btn=document.getElementById('loginBtn');
-      btn.disabled=!0;btn.textContent='登录中...';
-      try{
-        var r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});
-        var d=await r.json();
-        if(d.success){toast('登录成功','success');window.location.href='/'}
-        else toast(d.message||'登录失败','error')
-      }catch(e){toast('登录失败: '+e.message,'error')}
-      finally{btn.disabled=!1;btn.textContent='登录'}
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+
+      if (!email || !password) {
+        showToast('请输入邮箱和密码', 'error');
+        return;
+      }
+
+      if (!/^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(email)) {
+        showToast('请输入有效的邮箱地址', 'error');
+        return;
+      }
+
+      const body = { email, password };
+      doLogin(body);
     }
+
+    function handleGuestLogin() {
+      const password = document.getElementById('password').value;
+      let body;
+      if (password) {
+        body = { isAdmin: true, password: password };
+      } else {
+        body = { isGuest: true };
+      }
+      doLogin(body);
+    }
+
+    function doLogin(body) {
+      const loginBtn = document.getElementById('loginBtn');
+      const guestBtn = document.getElementById('guestLoginBtn');
+      const emailInp = document.getElementById('email');
+      const passwordInp = document.getElementById('password');
+      loginBtn.disabled = true;
+      loginBtn.textContent = '登录中...';
+      if (guestBtn) guestBtn.disabled = true;
+      if (emailInp) emailInp.disabled = true;
+      if (passwordInp) passwordInp.disabled = true;
+
+      fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+      .then(function(response) { return response.json(); })
+      .then(function(data) {
+        if (data.success) {
+          showToast('登录成功', 'success');
+          window.location.href = '/';
+        } else {
+          showToast(data.message || '登录失败', 'error');
+          loginBtn.disabled = false;
+          loginBtn.textContent = '登录';
+          if (guestBtn) guestBtn.disabled = false;
+          if (emailInp) emailInp.disabled = false;
+          if (passwordInp) passwordInp.disabled = false;
+        }
+      })
+      .catch(function(error) {
+        showToast('登录失败: ' + error.message, 'error');
+        loginBtn.disabled = false;
+        loginBtn.textContent = '登录';
+        if (guestBtn) guestBtn.disabled = false;
+        if (emailInp) emailInp.disabled = false;
+        if (passwordInp) passwordInp.disabled = false;
+      });
+    }
+
+    ${SHARED_SCRIPTS}
   </script>
 </body>
 </html>
@@ -1718,6 +2448,7 @@ const INDEX_PAGE = `
     </div>
     <div class="header-actions">
       <button class="theme-toggle" onclick="toggleTheme()" title="切换主题"></button>
+      <button class="btn btn-secondary" id="adminBtn" onclick="window.location.href='/admin.html'">后台</button>
       <button class="btn btn-secondary" onclick="logout()">退出</button>
     </div>
   </div>
@@ -1835,6 +2566,48 @@ const INDEX_PAGE = `
     </div>
   </div>
 
+  <!-- Share Modal -->
+  <div class="modal-overlay" id="shareModal">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title">创建分享链接</div>
+        <button class="modal-close" onclick="closeModal('shareModal')">&times;</button>
+      </div>
+      <form onsubmit="createShare(event)">
+        <div class="form-group">
+          <label class="form-label">分享密码（留空则无密码）</label>
+          <input type="text" id="sharePassword" class="form-input" placeholder="可选">
+        </div>
+        <div class="form-group">
+          <label class="form-label">有效期</label>
+          <select id="shareExpiry" class="form-select">
+            <option value="1h">1小时</option>
+            <option value="1d" selected>1天</option>
+            <option value="1m">1个月</option>
+            <option value="permanent">永久有效</option>
+          </select>
+        </div>
+        <input type="hidden" id="shareFilePath">
+        <button type="submit" class="btn btn-primary" style="width: 100%;">创建分享链接</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Share Result Modal -->
+  <div class="modal-overlay" id="shareResultModal">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title">分享链接已创建</div>
+        <button class="modal-close" onclick="closeModal('shareResultModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label class="form-label">分享链接</label>
+        <input type="text" id="shareResultUrl" class="form-input" readonly>
+      </div>
+      <button class="btn btn-primary" style="width: 100%;" onclick="copyShareLink()">复制链接</button>
+    </div>
+  </div>
+
   <!-- Ace Editor Modal (窗口模式) -->
   <div class="modal-overlay editor-modal-overlay" id="editorModal">
     <div id="editorWindow" class="editor-window">
@@ -1910,6 +2683,7 @@ const INDEX_PAGE = `
       <span class="upload-progress-filename" id="uploadProgressFilename">准备上传...</span>
       <span class="upload-progress-percentage" id="uploadProgressPercentage">0%</span>
     </div>
+    <div id="uploadProgressDetail" style="font-size: 11px; color: var(--text-muted); margin-top: 6px; display: none;"></div>
   </div>
 
   <script>
@@ -2074,6 +2848,7 @@ const INDEX_PAGE = `
 
       checkAuth().then(() => {
         updateNavButtons();
+        // 并行加载文件和收藏夹，互不依赖，减少等待时间
         Promise.all([loadFiles(), initFavorites()]).then(() => {
           initDragUpload();
           initContextMenu();
@@ -2085,6 +2860,7 @@ const INDEX_PAGE = `
 let favorites = [];
 
 async function initFavorites() {
+  // 优先使用服务端嵌入数据，省掉 /api/favorites KV 读取
   if (window.__INIT__ && window.__INIT__.favorites) {
     favorites = window.__INIT__.favorites;
     renderFavorites();
@@ -2175,12 +2951,14 @@ async function removeFavorite(index) {
   }
 }
 
+// --- 收藏夹拖拽排序 ---
 let _favDragIndex = -1;
 
 function onFavDragStart(event, index) {
   _favDragIndex = index;
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', index);
+  // 延迟添加 dragging 样式，避免截屏时包含它
   requestAnimationFrame(() => {
     event.target.classList.add('sidebar-item-dragging');
   });
@@ -2203,9 +2981,11 @@ async function onFavDrop(event, toIndex) {
   const fromIndex = _favDragIndex;
   if (fromIndex < 0 || fromIndex === toIndex) return;
 
+  // 本地重排
   const [moved] = favorites.splice(fromIndex, 1);
   favorites.splice(toIndex, 0, moved);
 
+  // 保存新顺序到服务端
   try {
     const response = await fetch('/api/favorites/order', {
       method: 'PUT',
@@ -2224,6 +3004,7 @@ async function onFavDrop(event, toIndex) {
   renderFavorites();
 }
 
+// 拖拽结束时清理
 document.addEventListener('dragend', () => {
   _favDragIndex = -1;
   document.querySelectorAll('.sidebar-item-dragging').forEach(el => el.classList.remove('sidebar-item-dragging'));
@@ -2287,6 +3068,9 @@ function showContextMenu(event, type, path, name, previewType) {
       <div class="context-menu-divider"></div>\` : ''}
       <div class="context-menu-item" onclick="downloadFile('\${path}'); hideContextMenu();">
         <span>📥</span> <span>下载</span>
+      </div>
+      <div class="context-menu-item" onclick="showShareModal('\${path}'); hideContextMenu();">
+        <span>🔗</span> <span>分享</span>
       </div>
       <div class="context-menu-divider"></div>
       <div class="context-menu-item" onclick="showRenameModal('\${path}', '\${name}'); hideContextMenu();">
@@ -2482,6 +3266,7 @@ function handleItemClick(event, element) {
       selectSingle(element);
     }
   } else if (isMobile) {
+    // 移动端：点击直接打开
     const type = element.dataset.type;
     const path = element.dataset.path;
     if (type === 'folder') {
@@ -2610,17 +3395,53 @@ function initMultiSelect() {
   });
 }
 
+    let currentUserRole = 'user';
+
     async function checkAuth() {
       try {
-        if (window.__INIT__) return;
-        const response = await fetch('/api/auth/check');
-        const data = await response.json();
-        if (!data.authenticated) {
-          window.location.href = '/login.html';
+        // 优先使用服务端嵌入的初始数据，省掉 /api/auth/check 请求
+        if (window.__INIT__) {
+          currentUserRole = window.__INIT__.role || 'user';
+        } else {
+          const response = await fetch('/api/auth/check');
+          const data = await response.json();
+          if (!data.authenticated) {
+            window.location.href = '/login.html';
+            return;
+          }
+          currentUserRole = data.role || 'user';
+        }
+        if (currentUserRole === 'guest') {
+          const guestRoot = (window.__INIT__ && window.__INIT__.guestRoot) || 'guest';
+          showGuestNotice(guestRoot);
+          if (currentPath === '/') {
+            currentPath = '/' + guestRoot + '/';
+            history = ['/' + guestRoot + '/'];
+            historyIndex = 0;
+          }
         }
       } catch (error) {
         if (!window.__INIT__) window.location.href = '/login.html';
       }
+    }
+
+    function showGuestNotice(guestRoot) {
+      const notice = document.createElement('div');
+      notice.id = 'guestNotice';
+      notice.style.cssText = 'background: var(--warning-bg, #fff3cd); color: var(--warning-text, #856404); padding: 10px 16px; border-radius: 8px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 13px;';
+      const root = guestRoot || 'guest';
+      notice.innerHTML = '📦 游客模式：仅可访问 ' + root + ' 文件夹';
+      const mainContent = document.querySelector('.main-content');
+      if (mainContent && !document.getElementById('guestNotice')) {
+        mainContent.insertBefore(notice, mainContent.firstChild.nextSibling || mainContent.firstChild);
+      }
+      updateUIForGuest();
+    }
+
+    function updateUIForGuest() {
+      if (currentUserRole !== 'guest') return;
+      const adminBtn = document.getElementById('adminBtn');
+      if (adminBtn) adminBtn.style.display = 'none';
     }
 
     async function loadFiles() {
@@ -2655,7 +3476,24 @@ function initMultiSelect() {
       let html = '<button class="nav-btn" id="backBtn"' + backDisabled + ' onclick="goBack()" title="后退">◀</button>';
       html += '<button class="nav-btn" id="forwardBtn"' + forwardDisabled + ' onclick="goForward()" title="前进">▶</button>';
 
-      
+      if (currentUserRole === 'guest') {
+        const guestRoot = (window.__INIT__ && window.__INIT__.guestRoot) || 'guest';
+        if (parts.length === 1) {
+          html += ' <span class="breadcrumb-item active">' + guestRoot + '</span>';
+        } else {
+          html += ' <a href="javascript:void(0)" class="breadcrumb-item" data-path="/' + guestRoot + '">' + guestRoot + '</a>';
+          let path = '/' + guestRoot;
+          for (let i = 1; i < parts.length; i++) {
+            path += '/' + parts[i];
+            html += '<span class="breadcrumb-separator">/</span>';
+            if (i === parts.length - 1) {
+              html += '<span class="breadcrumb-item active">' + parts[i] + '</span>';
+            } else {
+              html += '<a href="javascript:void(0)" class="breadcrumb-item" data-path="' + path + '">' + parts[i] + '</a>';
+            }
+          }
+        }
+      } else {
         html += ' <a href="javascript:void(0)" class="breadcrumb-item" data-path="/">🏠 根目录</a>';
         let path = '';
         parts.forEach((part, index) => {
@@ -2667,6 +3505,7 @@ function initMultiSelect() {
             html += '<a href="javascript:void(0)" class="breadcrumb-item" data-path="' + path + '">' + part + '</a>';
           }
         });
+      }
       breadcrumb.innerHTML = html;
     }
 
@@ -2806,6 +3645,8 @@ sortedFiles.forEach(file => {
     }
 
     function navigateTo(path, fromHistory = false) {
+      const guestRoot = (window.__INIT__ && window.__INIT__.guestRoot) || 'guest';
+      if (currentUserRole === 'guest' && !path.startsWith('/' + guestRoot)) return;
       currentPath = path;
       if (!fromHistory) {
         history = history.slice(0, historyIndex + 1);
@@ -2815,6 +3656,7 @@ sortedFiles.forEach(file => {
       updateNavButtons();
       loadFiles();
       highlightCurrentFavorite();
+      // close mobile sidebar on navigate
       var sidebar = document.getElementById('sidebar');
       if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
     }
@@ -2915,8 +3757,17 @@ sortedFiles.forEach(file => {
       e.stopPropagation();
     }
 
+    function formatBytes(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+      if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+      return (bytes / 1073741824).toFixed(2) + ' GB';
+    }
+
     async function uploadFiles(files) {
       if (!files || files.length === 0) return;
+
+      // 上传前检测文件大小（100MB）
       var oversizedNames = [];
       for (var i = 0; i < files.length; i++) {
         if (files[i].size > 100 * 1024 * 1024) {
@@ -2942,12 +3793,16 @@ sortedFiles.forEach(file => {
       let failCount = 0;
       const totalFiles = files.length;
       const SMALL = 1 * 1024 * 1024;
+
+      // 分堆
       const smallFiles = [];
       const largeFiles = [];
       for (let i = 0; i < files.length; i++) {
         if (files[i].size <= SMALL) smallFiles.push(files[i]);
         else largeFiles.push(files[i]);
       }
+
+      // 上传一个大文件（逐个，有实时进度）
       async function uploadLarge(file) {
         progressFilename.textContent = file.name + ' (' + (successCount + failCount + 1) + '/' + totalFiles + ')';
         return new Promise((resolve) => {
@@ -2977,6 +3832,8 @@ sortedFiles.forEach(file => {
           xhr.send(fd);
         });
       }
+
+      // 先并发上传小文件
       if (smallFiles.length > 0) {
         progressFilename.textContent = '上传小文件...（' + smallFiles.length + ' 个）';
         await Promise.all(smallFiles.map(file => {
@@ -2999,6 +3856,8 @@ sortedFiles.forEach(file => {
           });
         }));
       }
+
+      // 再逐个上传大文件
       for (let i = 0; i < largeFiles.length; i++) {
         await uploadLarge(largeFiles[i]);
       }
@@ -3021,10 +3880,8 @@ sortedFiles.forEach(file => {
       }, 2000);
     }
 
-    function closeUploadProgress() {
-      const progressContainer = document.getElementById('uploadProgressContainer');
-      progressContainer.classList.remove('active');
-    }
+    
+
 
     async function previewFile(path, previewType, filename) {
       const overlay = document.getElementById('previewOverlay');
@@ -3183,6 +4040,52 @@ sortedFiles.forEach(file => {
 
     async function downloadFile(path) {
       window.open('/api/download' + path, '_blank');
+    }
+
+    function showShareModal(path) {
+      document.getElementById('shareFilePath').value = path;
+      document.getElementById('sharePassword').value = '';
+      document.getElementById('shareExpiry').value = '1d';
+      document.getElementById('shareModal').classList.add('active');
+    }
+
+    async function createShare(event) {
+      event.preventDefault();
+      const filePath = document.getElementById('shareFilePath').value;
+      const password = document.getElementById('sharePassword').value;
+      const expiresIn = document.getElementById('shareExpiry').value;
+
+      showLoading(true);
+      closeModal('shareModal');
+
+      try {
+        const response = await fetch('/api/share', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filePath, password, expiresIn })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          const fullUrl = window.location.origin + data.shareUrl;
+          document.getElementById('shareResultUrl').value = fullUrl;
+          document.getElementById('shareResultModal').classList.add('active');
+        } else {
+          showToast('创建分享链接失败: ' + data.message, 'error');
+        }
+      } catch (error) {
+        showToast('创建分享链接失败: ' + error.message, 'error');
+      } finally {
+        showLoading(false);
+      }
+    }
+
+    function copyShareLink() {
+      const input = document.getElementById('shareResultUrl');
+      input.select();
+      document.execCommand('copy');
+      showToast('链接已复制到剪贴板', 'success');
     }
 
     let aceEditor = null;
@@ -3471,7 +4374,722 @@ sortedFiles.forEach(file => {
 
   </script>
 </body>
-</html>`;
+</html>
+`;
+
+const ADMIN_PAGE = `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>管理后台</title>
+  <script>(function(){var t=localStorage.getItem('theme')||'dark';document.documentElement.setAttribute('data-theme',t)})()</script>
+  ${CSS_STYLES}
+</head>
+<body>
+  <div class="header">
+    <div class="logo">管理后台</div>
+    <div class="header-actions">
+      <button class="theme-toggle" onclick="toggleTheme()" title="切换主题"></button>
+      <button class="btn btn-secondary" onclick="window.location.href='/'">返回云盘</button>
+      <button class="btn btn-secondary" onclick="logout()">退出登录</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('stats')">统计数据</button>
+      <button class="tab" onclick="switchTab('shares')">分享链接</button>
+      <button class="tab" id="usersTabBtn" onclick="switchTab('users')">授权用户</button>
+      <button class="tab" id="settingsTabBtn" onclick="switchTab('settings')">系统设置</button>
+    </div>
+
+    <!-- Stats Tab -->
+    <div id="statsTab" class="tab-content active">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-value" id="totalShares">0</div>
+          <div class="stat-label">总分享链接数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="totalViews">0</div>
+          <div class="stat-label">总浏览次数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="totalDownloads">0</div>
+          <div class="stat-label">总下载次数</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shares Tab -->
+    <div id="sharesTab" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">分享链接管理</div>
+        </div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>文件名</th>
+                <th>分享ID</th>
+                <th>密码保护</th>
+                <th>浏览次数</th>
+                <th>下载次数</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="sharesTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Users Tab -->
+    <div id="usersTab" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">授权用户管理</div>
+          <button class="btn btn-primary" onclick="showAddUserModal()">添加用户</button>
+        </div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>邮箱</th>
+                <th>角色</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="usersTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Tab -->
+    <div id="settingsTab" class="tab-content">
+      <div class="card">
+        <div class="card-header"><div class="card-title">全局设置</div></div>
+        <div class="form-group" style="padding: 20px;">
+          <label class="form-label" style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
+            <span>游客登录</span>
+            <span style="display: flex; align-items: center; gap: 8px;">
+              <span id="guestLoginLabel" style="font-size: 13px; color: var(--text-muted);">已开启</span>
+              <label class="toggle-switch">
+                <input type="checkbox" id="guestLoginToggle" onchange="toggleGuestLogin()" checked>
+                <span class="toggle-slider"></span>
+              </label>
+            </span>
+          </label>
+          <p class="form-help">关闭后游客将无法登录和使用云盘</p>
+        </div>
+        <div class="form-group" style="padding: 0 20px 20px;">
+          <label class="form-label">全局上传限制（MB）</label>
+          <input type="number" id="globalMaxUpload" class="form-input" min="0" value="0" style="width: 200px;" placeholder="0 = 不限制">
+          <p class="form-help">0 表示不限制，仅对未单独设置的用户生效</p>
+        </div>
+
+        <div style="padding: 0 20px 20px; border-top: 1px solid var(--border); margin-top: 8px;">
+          <p style="font-weight: 600; font-size: 14px; margin-bottom: 12px; color: var(--text);">WebDAV 设置</p>
+          <p class="form-help" style="margin-bottom: 14px;">开启后可通过 WebDAV 客户端（如 RaiDrive、Cyberduck）挂载为网络驱动器。连接地址：<code style="background:var(--surface-hover);padding:2px 6px;border-radius:4px;" id="webdavUrlDisplay">/dav/</code></p>
+          <div class="form-group">
+            <label class="form-label" style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
+              <span>启用 WebDAV</span>
+              <span style="display: flex; align-items: center; gap: 8px;">
+                <span id="webdavEnabledLabel" style="font-size: 13px; color: var(--text-muted);">已开启</span>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="webdavEnabledToggle" onchange="toggleWebdavEnabled()" checked>
+                  <span class="toggle-slider"></span>
+                </label>
+              </span>
+            </label>
+            <p class="form-help">关闭后所有 WebDAV 请求将被拒绝</p>
+          </div>
+          <div class="form-group">
+            <label class="form-label" style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
+              <span>只读模式</span>
+              <span style="display: flex; align-items: center; gap: 8px;">
+                <span id="webdavReadOnlyLabel" style="font-size: 13px; color: var(--text-muted);">已关闭</span>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="webdavReadOnlyToggle" onchange="toggleWebdavReadOnly()">
+                  <span class="toggle-slider"></span>
+                </label>
+              </span>
+            </label>
+            <p class="form-help">只读模式下仅允许浏览和下载，禁止上传、删除、重命名等操作</p>
+          </div>
+          <div class="form-group">
+            <label class="form-label">WebDAV 连接说明</label>
+            <div style="background: var(--surface-hover); border-radius: var(--radius-sm); padding: 12px 16px; font-size: 12px; line-height: 1.8; color: var(--text-muted);">
+              <p><strong>认证方式:</strong> Basic Auth</p>
+              <p><strong>管理员:</strong> 用户名任意，密码为管理员密码</p>
+              <p><strong>注册用户:</strong> 用户名为邮箱，密码为登录密码</p>
+              <p><strong>游客:</strong> 用户名为 <code>guest</code></p>
+              <p><strong>支持协议:</strong> WebDAV Class 1 &amp; 2</p>
+              <p><strong>支持操作:</strong> 浏览、上传、下载、删除、重命名/移动、复制、创建文件夹</p>
+            </div>
+          </div>
+        </div>
+
+        <div style="padding: 0 20px 20px;">
+          <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+          <span id="settingsMsg" style="margin-left: 12px; font-size: 13px;"></span>
+        </div>
+      </div>
+    </div>
+
+  <!-- Add User Modal -->
+  <div class="modal-overlay" id="addUserModal">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title">添加授权用户</div>
+        <button class="modal-close" onclick="closeModal('addUserModal')">×</button>
+      </div>
+      <form onsubmit="addUser(event)">
+        <div class="form-group">
+          <label class="form-label">邮箱</label>
+          <input type="email" id="newUserEmail" class="form-input" placeholder="请输入邮箱" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">密码</label>
+          <input type="text" id="newUserPassword" class="form-input" placeholder="请输入密码" required>
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">添加用户</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- User Permissions Modal -->
+  <div class="modal-overlay" id="userPermsModal">
+    <div class="modal" style="max-width: 500px;">
+      <div class="modal-header">
+        <div class="modal-title">用户权限设置 - <span id="permsUserEmail"></span></div>
+        <button class="modal-close" onclick="closeModal('userPermsModal')">×</button>
+      </div>
+      <div class="form-group">
+        <label class="form-label">角色</label>
+        <select id="permsRole" class="form-input">
+          <option value="user">普通用户</option>
+          <option value="restricted">受限用户</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">上传限制（MB）</label>
+        <input type="number" id="permsMaxUpload" class="form-input" min="0" value="0" placeholder="0 = 不限制">
+        <p class="form-help" style="font-size: 12px;">0 表示不限制，或使用全局设置</p>
+      </div>
+      <div class="form-group">
+        <label class="form-label">允许访问的文件夹</label>
+        <input type="text" id="permsFolders" class="form-input" placeholder="多个文件夹用逗号分隔，留空=全部允许">
+        <p class="form-help" style="font-size: 12px;">例如: myfiles, projects/work</p>
+      </div>
+      <div class="form-group">
+        <label class="form-label" style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
+          <span>允许 WebDAV 访问</span>
+          <span style="display: flex; align-items: center; gap: 8px;">
+            <span id="permsWebdavLabel" style="font-size: 13px; color: var(--text-muted);">已开启</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="permsWebdavToggle" onchange="togglePermsWebdav()" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </span>
+        </label>
+        <p class="form-help" style="font-size: 12px;">关闭后该用户无法通过 WebDAV 客户端访问</p>
+      </div>
+      <div class="form-group">
+        <label class="form-label" style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
+          <span>WebDAV 只读模式</span>
+          <span style="display: flex; align-items: center; gap: 8px;">
+            <span id="permsWebdavReadOnlyLabel" style="font-size: 13px; color: var(--text-muted);">已关闭</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="permsWebdavReadOnlyToggle" onchange="togglePermsWebdavReadOnly()">
+              <span class="toggle-slider"></span>
+            </label>
+          </span>
+        </label>
+        <p class="form-help" style="font-size: 12px;">开启后该用户仅可浏览和下载，禁止上传、删除、重命名等操作</p>
+      </div>
+      <button class="btn btn-primary" onclick="saveUserPerms()" style="width: 100%;">保存权限</button>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toastContainer"></div>
+
+  <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+    <div class="spinner"></div>
+  </div>
+
+  <script>
+    async function checkAdminAuth() {
+      try {
+        let role = null;
+        if (window.__INIT__) {
+          role = window.__INIT__.role;
+        } else {
+          const response = await fetch('/api/auth/check');
+          const data = await response.json();
+          if (!data.authenticated) {
+            window.location.href = '/login.html';
+            return;
+          }
+          role = data.role;
+        }
+        if (!role) {
+          window.location.href = '/login.html';
+          return;
+        }
+        if (role !== 'admin') {
+          document.getElementById('usersTabBtn').style.display = 'none';
+          document.getElementById('settingsTabBtn').style.display = 'none';
+          if (document.getElementById('usersTab').classList.contains('active') ||
+              document.getElementById('settingsTab') && document.getElementById('settingsTab').classList.contains('active')) {
+            switchTab('stats');
+          }
+        }
+      } catch (error) {
+        if (!window.__INIT__) window.location.href = '/login.html';
+      }
+    }
+
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+      event.target.classList.add('active');
+      document.getElementById(tab + 'Tab').classList.add('active');
+
+      if (tab === 'stats') loadStats();
+      else if (tab === 'shares') loadShares();
+      else if (tab === 'users') loadUsers();
+      else if (tab === 'settings') loadSettings();
+    }
+
+    async function loadStats() {
+      try {
+        const response = await fetch('/api/admin/stats');
+        const data = await response.json();
+
+        if (data.success) {
+          document.getElementById('totalShares').textContent = data.totalShares;
+          document.getElementById('totalViews').textContent = data.totalViews;
+          document.getElementById('totalDownloads').textContent = data.totalDownloads;
+        }
+      } catch (error) {
+        showToast('加载统计数据失败', 'error');
+      }
+    }
+
+    async function loadShares() {
+      showLoading(true);
+      try {
+        const response = await fetch('/api/admin/shares');
+        const data = await response.json();
+
+        if (data.success) {
+          const tbody = document.getElementById('sharesTable');
+
+          if (data.shares.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">暂无分享链接</td></tr>';
+            return;
+          }
+
+          tbody.innerHTML = data.shares.map(share => \`
+            <tr>
+              <td>\${escapeHtml(share.fileName)}</td>
+              <td><code>\${share.shareId}</code></td>
+              <td>\${share.passwordHash ? '是' : '否'}</td>
+              <td>\${share.viewCount}</td>
+              <td>\${share.downloadCount}</td>
+              <td>
+                \${share.isExpired
+                  ? '<span class="badge badge-error">已过期</span>'
+                  : '<span class="badge badge-success">有效</span>'}
+              </td>
+              <td>
+                <button class="btn btn-sm btn-secondary" onclick="copyShareLink('\${share.shareId}')">复制链接</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteShare('\${share.shareId}')">删除</button>
+              </td>
+            </tr>
+          \`).join('');
+        }
+      } catch (error) {
+        showToast('加载分享列表失败', 'error');
+      } finally {
+        showLoading(false);
+      }
+    }
+
+    async function loadUsers() {
+      showLoading(true);
+      try {
+        const response = await fetch('/api/admin/users');
+        const data = await response.json();
+
+        if (data.success) {
+          const tbody = document.getElementById('usersTable');
+
+          // 游客始终显示在列表顶部，其余为注册用户
+          const guestUser = data.users.find(u => u.email === '__guest__');
+          const normalUsers = data.users.filter(u => u.email !== '__guest__');
+
+          let rowsHtml = '';
+          
+          if (guestUser) {
+            rowsHtml += \`
+              <tr>
+                <td>👤 游客（公共访问）</td>
+                <td><span class="badge badge-guest">游客 · \${guestUser.enabled ? '已启用' : '已禁用'}</span></td>
+                <td>-</td>
+                <td>
+                  <button class="btn btn-sm btn-primary" onclick="showUserPermsModal('__guest__')">权限</button>
+                  <button class="btn btn-sm btn-secondary" onclick="switchTab('settings')">⚙ 开关</button>
+                </td>
+              </tr>
+            \`;
+          }
+
+          if (normalUsers.length === 0) {
+            rowsHtml += '<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">暂无注册用户</td></tr>';
+          } else {
+            rowsHtml += normalUsers.map(user => \`
+              <tr>
+                <td>\${escapeHtml(user.email)}</td>
+                <td>\${user.role === 'admin' ? '管理员' : '普通用户'}</td>
+                <td>\${user.createdAt ? new Date(user.createdAt).toLocaleString() : '-'}</td>
+                <td>
+                  <button class="btn btn-sm btn-primary" onclick="showUserPermsModal('\${escapeHtml(user.email)}')">权限</button>
+                  <button class="btn btn-sm btn-danger" onclick="deleteUser('\${encodeURIComponent(user.email)}')">撤销授权</button>
+                </td>
+              </tr>
+            \`).join('');
+          }
+
+          tbody.innerHTML = rowsHtml;
+        }
+      } catch (error) {
+        showToast('加载用户列表失败', 'error');
+      } finally {
+        showLoading(false);
+      }
+    }
+
+    function showAddUserModal() {
+      document.getElementById('newUserEmail').value = '';
+      document.getElementById('newUserPassword').value = '';
+      document.getElementById('addUserModal').classList.add('active');
+    }
+
+    async function addUser(event) {
+      event.preventDefault();
+      const email = document.getElementById('newUserEmail').value;
+      const password = document.getElementById('newUserPassword').value;
+      closeModal('addUserModal');
+      await apiCall('/api/admin/users', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      }, '用户添加成功', loadUsers);
+    }
+
+    async function deleteUser(email) {
+      if (!confirm('确定要撤销该用户的授权吗？')) return;
+      await apiCall('/api/admin/users/' + email, { method: 'DELETE' }, '用户已删除', loadUsers);
+    }
+
+    async function deleteShare(shareId) {
+      if (!confirm('确定要删除该分享链接吗？')) return;
+      await apiCall('/api/admin/shares/' + shareId, { method: 'DELETE' }, '分享链接已删除', loadShares);
+    }
+
+    function copyShareLink(shareId) {
+      const url = window.location.origin + '/s/' + shareId;
+      navigator.clipboard.writeText(url).then(() => {
+        showToast('链接已复制', 'success');
+      }).catch(() => {
+        showToast('复制失败', 'error');
+      });
+    }
+
+    // === 系统设置 ===
+    let _userPermsEmail = '';
+
+    async function loadSettings() {
+      try {
+        const r = await fetch('/api/admin/settings');
+        const d = await r.json();
+        if (d.success && d.settings) {
+          document.getElementById('guestLoginToggle').checked = d.settings.guestLogin !== false;
+          document.getElementById('guestLoginLabel').textContent = d.settings.guestLogin !== false ? '已开启' : '已关闭';
+          document.getElementById('globalMaxUpload').value = d.settings.maxUploadSize || 0;
+          document.getElementById('webdavEnabledToggle').checked = d.settings.webdavEnabled !== false;
+          document.getElementById('webdavEnabledLabel').textContent = d.settings.webdavEnabled !== false ? '已开启' : '已关闭';
+          document.getElementById('webdavReadOnlyToggle').checked = !!d.settings.webdavReadOnly;
+          document.getElementById('webdavReadOnlyLabel').textContent = d.settings.webdavReadOnly ? '已开启' : '已关闭';
+          document.getElementById('webdavUrlDisplay').textContent = window.location.origin + '/dav/';
+        }
+      } catch (e) { showToast('加载设置失败', 'error'); }
+    }
+
+    function toggleGuestLogin() {
+      const on = document.getElementById('guestLoginToggle').checked;
+      document.getElementById('guestLoginLabel').textContent = on ? '已开启' : '已关闭';
+    }
+    function toggleWebdavEnabled() {
+      const on = document.getElementById('webdavEnabledToggle').checked;
+      document.getElementById('webdavEnabledLabel').textContent = on ? '已开启' : '已关闭';
+    }
+    function toggleWebdavReadOnly() {
+      const on = document.getElementById('webdavReadOnlyToggle').checked;
+      document.getElementById('webdavReadOnlyLabel').textContent = on ? '已开启' : '已关闭';
+    }
+
+    async function saveSettings() {
+      const guestLogin = document.getElementById('guestLoginToggle').checked;
+      const maxUploadSize = parseInt(document.getElementById('globalMaxUpload').value) || 0;
+      const webdavEnabled = document.getElementById('webdavEnabledToggle').checked;
+      const webdavReadOnly = document.getElementById('webdavReadOnlyToggle').checked;
+      const msgEl = document.getElementById('settingsMsg');
+      try {
+        const r = await fetch('/api/admin/settings', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guestLogin, maxUploadSize, webdavEnabled, webdavReadOnly })
+        });
+        const d = await r.json();
+        if (d.success) {
+          msgEl.textContent = '设置已保存';
+          msgEl.style.color = 'var(--success)';
+        } else {
+          msgEl.textContent = d.message || '保存失败';
+          msgEl.style.color = 'var(--error)';
+        }
+      } catch (e) {
+        msgEl.textContent = '网络错误';
+        msgEl.style.color = 'var(--error)';
+      }
+      setTimeout(() => { msgEl.textContent = ''; }, 3000);
+    }
+
+    // === 用户权限设置 ===
+    async function showUserPermsModal(email) {
+      _userPermsEmail = email;
+      const isGuest = email === '__guest__';
+      document.getElementById('permsUserEmail').textContent = isGuest ? '游客' : email;
+      // 游客不能修改角色，隐藏角色下拉
+      const roleGroup = document.getElementById('permsRole').parentElement;
+      roleGroup.style.display = isGuest ? 'none' : '';
+      document.getElementById('permsRole').value = 'user';
+      document.getElementById('permsMaxUpload').value = 0;
+      document.getElementById('permsFolders').value = isGuest ? 'guest' : '';
+      document.getElementById('permsWebdavToggle').checked = true;
+      document.getElementById('permsWebdavLabel').textContent = '已开启';
+      document.getElementById('permsWebdavReadOnlyToggle').checked = false;
+      document.getElementById('permsWebdavReadOnlyLabel').textContent = '已关闭';
+      try {
+        const r = await fetch('/api/admin/users/' + encodeURIComponent(email) + '/settings');
+        const d = await r.json();
+        if (d.success && d.limits) {
+          document.getElementById('permsRole').value = d.limits.role || 'user';
+          document.getElementById('permsMaxUpload').value = d.limits.maxUploadSize || 0;
+          const savedFolders = d.limits.allowedFolders;
+          if (savedFolders && savedFolders.length > 0) {
+            document.getElementById('permsFolders').value = savedFolders.join(', ');
+          } else if (!isGuest) {
+            document.getElementById('permsFolders').value = '';
+          }
+          const wdEnabled = d.limits.webdavEnabled !== false;
+          document.getElementById('permsWebdavToggle').checked = wdEnabled;
+          document.getElementById('permsWebdavLabel').textContent = wdEnabled ? '已开启' : '已关闭';
+          const wdReadOnly = !!d.limits.webdavReadOnly;
+          document.getElementById('permsWebdavReadOnlyToggle').checked = wdReadOnly;
+          document.getElementById('permsWebdavReadOnlyLabel').textContent = wdReadOnly ? '已开启' : '已关闭';
+        }
+      } catch (e) {}
+      document.getElementById('userPermsModal').classList.add('active');
+    }
+
+    async function saveUserPerms() {
+      const isGuest = _userPermsEmail === '__guest__';
+      const role = document.getElementById('permsRole').value;
+      const maxUploadSize = parseInt(document.getElementById('permsMaxUpload').value) || 0;
+      const foldersRaw = document.getElementById('permsFolders').value.trim();
+      const allowedFolders = foldersRaw ? foldersRaw.split(',').map(f => f.trim()).filter(f => f.length > 0) : [];
+      const webdavEnabled = document.getElementById('permsWebdavToggle').checked;
+      const webdavReadOnly = document.getElementById('permsWebdavReadOnlyToggle').checked;
+
+      const body = { maxUploadSize, allowedFolders, webdavEnabled, webdavReadOnly };
+      if (!isGuest) body.role = role;
+
+      await apiCall('/api/admin/users/' + encodeURIComponent(_userPermsEmail) + '/settings', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }, '用户权限已更新', () => { closeModal('userPermsModal'); loadUsers(); });
+    }
+
+    function togglePermsWebdav() {
+      const on = document.getElementById('permsWebdavToggle').checked;
+      document.getElementById('permsWebdavLabel').textContent = on ? '已开启' : '已关闭';
+    }
+
+    function togglePermsWebdavReadOnly() {
+      const on = document.getElementById('permsWebdavReadOnlyToggle').checked;
+      document.getElementById('permsWebdavReadOnlyLabel').textContent = on ? '已开启' : '已关闭';
+    }
+
+    ${SHARED_SCRIPTS}
+
+    checkAdminAuth();
+    loadStats();
+  </script>
+</body>
+</html>
+`;
+
+const SHARE_PAGE = `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>文件分享</title>
+  <script>(function(){var t=localStorage.getItem('theme')||'dark';document.documentElement.setAttribute('data-theme',t)})()</script>
+  ${CSS_STYLES}
+</head>
+<body>
+  <div class="login-container">
+    <button class="theme-toggle" onclick="toggleTheme()" title="切换主题" style="position:fixed;top:16px;right:16px;z-index:10;"></button>
+    <div class="share-card" id="shareCard">
+      <div id="loadingState">
+        <div class="spinner" style="margin: 0 auto 20px;"></div>
+        <div>加载中...</div>
+      </div>
+
+      <div id="expiredState" style="display: none;">
+        <div class="share-icon">⚠️</div>
+        <div class="share-expired">分享链接已过期或不存在</div>
+        <p style="color: var(--text-muted); margin-top: 16px;">请联系分享者获取新的链接</p>
+      </div>
+
+      <div id="shareContent" style="display: none;">
+        <div class="share-icon">📄</div>
+        <div class="share-filename" id="fileName"></div>
+        <div class="share-filesize" id="fileSize"></div>
+
+        <div id="passwordForm" style="display: none;">
+          <div class="form-group">
+            <label class="form-label">请输入分享密码</label>
+            <input type="password" id="sharePassword" class="form-input" placeholder="输入密码">
+          </div>
+        </div>
+
+        <button class="btn btn-primary" style="width: 100%; margin-top: 20px;" onclick="downloadFile()">
+          下载文件
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script>
+    let shareId = '';
+    let requiresPassword = false;
+
+    async function loadShareInfo() {
+      
+      const pathParts = window.location.pathname.split('/');
+      shareId = pathParts[pathParts.length - 1];
+
+      if (!shareId) {
+        showExpired();
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/share/' + shareId);
+        const data = await response.json();
+
+        if (!data.success) {
+          showExpired();
+          return;
+        }
+
+        document.getElementById('loadingState').style.display = 'none';
+        document.getElementById('shareContent').style.display = 'block';
+
+        document.getElementById('fileName').textContent = data.fileName;
+        document.getElementById('fileSize').textContent = data.fileSizeFormatted;
+
+        requiresPassword = data.requiresPassword;
+        if (requiresPassword) {
+          document.getElementById('passwordForm').style.display = 'block';
+        }
+      } catch (error) {
+        showExpired();
+      }
+    }
+
+    function showExpired() {
+      document.getElementById('loadingState').style.display = 'none';
+      document.getElementById('expiredState').style.display = 'block';
+    }
+
+    async function downloadFile() {
+      const password = document.getElementById('sharePassword')?.value || '';
+
+      if (requiresPassword && !password) {
+        showToast('请输入分享密码', 'error');
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/share/' + shareId + '/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        });
+
+        if (response.ok) {
+          
+          const contentDisposition = response.headers.get('Content-Disposition');
+          let filename = 'download';
+          if (contentDisposition) {
+            const match = contentDisposition.match(/filename\\*?=(?:UTF-8'')?["']?([^"';\\n]+)/i);
+            if (match) {
+              filename = decodeURIComponent(match[1]);
+            }
+          }
+
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+
+          showToast('下载开始', 'success');
+        } else {
+          const data = await response.json();
+          showToast(data.message || '下载失败', 'error');
+        }
+      } catch (error) {
+        showToast('下载失败: ' + error.message, 'error');
+      }
+    }
+
+    ${SHARED_SCRIPTS}
+
+    loadShareInfo();
+  </script>
+</body>
+</html>
+`;
 
 export default {
   async fetch(request, env, ctx) {
@@ -3479,105 +5097,171 @@ export default {
     const path = decodeURIComponent(url.pathname);
     const method = request.method;
 
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type'
+    };
 
+    if (method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+
+    // 屏蔽无用请求，避免浪费 Worker 调用配额
     if (path === '/favicon.ico' || path === '/robots.txt' || path === '/.well-known' || path.startsWith('/.well-known/')) {
       return new Response(null, { status: 404 });
     }
 
     try {
-      if (method === 'OPTIONS' && (path === '*' || request.url === '*')) {
-        return new Response(null, { status: 200, headers: {
-          'Allow': 'OPTIONS,GET,HEAD,PUT,DELETE,PROPFIND,MKCOL,MOVE,COPY,LOCK,UNLOCK',
-          'DAV': '1, 2',
-          'MS-Author-Via': 'DAV',
-          'Content-Length': '0',
-          ...DAV_CORS
-        }});
-      }
-      if (path.startsWith('/dav/') || path === '/dav') {
-        let davPath = path === '/dav' ? '' : path.slice(5); // 去掉 "/dav/" 或 "/dav"
-        if (davPath.startsWith('/')) davPath = davPath.slice(1);
-        davPath = davPath.replace(/\/$/, '');
-        if (method === 'OPTIONS') {
-          return new Response(null, { status: 200, headers: {
-            'Allow': 'OPTIONS,GET,HEAD,PUT,DELETE,PROPFIND,MKCOL,MOVE,COPY,LOCK,UNLOCK',
-            'DAV': '1, 2',
-            'MS-Author-Via': 'DAV',
-            'Content-Length': '0',
-            ...DAV_CORS
-          }});
-        }
-        if (method === 'PROPFIND') {
-          return withDavCors(await handleDavPropfind(request, env, davPath));
-        }
-        if (method === 'GET') {
-          return withDavCors(await handleDavGet(request, env, davPath));
-        }
-        if (method === 'HEAD') {
-          return withDavCors(await handleDavHead(request, env, davPath));
-        }
-        if (method === 'PUT') {
-          return withDavCors(await handleDavPut(request, env, davPath));
-        }
-        if (method === 'DELETE') {
-          return withDavCors(await handleDavDelete(request, env, davPath));
-        }
-        if (method === 'MKCOL') {
-          return withDavCors(await handleDavMkcol(request, env, davPath));
-        }
-        if (method === 'MOVE') {
-          return withDavCors(await handleDavMove(request, env, davPath));
-        }
-        if (method === 'COPY') {
-          return withDavCors(await handleDavCopy(request, env, davPath));
-        }
-        if (method === 'LOCK') {
-          return withDavCors(getDavLockResponse());
-        }
-        if (method === 'UNLOCK') {
-          return withDavCors(new Response(null, { status: 204 }));
-        }
-
-        return withDavCors(new Response('Method Not Allowed', { status: 405 }));
-      }
-      if (method === 'OPTIONS') {
-        return new Response(null, { headers: DAV_CORS });
+      // WebDAV 路由
+      if (path.startsWith('/dav')) {
+        return await handleWebDAV(request, env);
       }
 
       if (path.startsWith('/api/')) {
+        
         if (path === '/api/login' && method === 'POST') {
           return await handleLogin(request, env);
-        } else if (path === '/api/logout' && method === 'POST') {
-          return await handleLogout();
-        } else if (path === '/api/auth/check') {
-          return await handleCheckAuth(request, env);
-        } else if (path === '/api/files' && method === 'POST') {
-          return await handleCreateFile(request, env);
-        } else if (path === '/api/folders' && method === 'POST') {
-          return await handleCreateFolder(request, env);
-        } else if (path.startsWith('/api/files')) {
-          const filePath = path.slice('/api/files'.length) || '/';
-          if (method === 'GET') return await handleListFiles(request, env, filePath);
-          if (method === 'POST') return await handleUploadFile(request, env, filePath);
-          if (method === 'PUT') return await handleRenameFile(request, env, filePath);
-          if (method === 'DELETE') return await handleDeleteFile(request, env, filePath);
-        } else if (path.startsWith('/api/download')) {
-          return await serveFile(request, env, path.slice('/api/download'.length), { download: true });
-        } else if (path.startsWith('/api/preview')) {
-          return await serveFile(request, env, path.slice('/api/preview'.length), { cache: true });
-        } else if (path.startsWith('/api/edit')) {
-          return await handleEditFile(request, env, path.slice('/api/edit'.length));
-        } else if (path === '/api/search' && method === 'GET') {
-          return await handleSearchFiles(request, env);
-        } else if (path === '/api/favorites') {
-          return await handleFavorites(request, env);
-        } else {
-          return jsonResponse({ success: false, message: 'API 路径不存在' }, 404);
         }
+
+        if (path === '/api/logout' && method === 'POST') {
+          return await handleLogout();
+        }
+
+        if (path === '/api/auth/check') {
+          return await handleCheckAuth(request, env);
+        }
+
+        if (path === '/api/files' && method === 'POST') {
+          return await handleCreateFile(request, env);
+        }
+
+        if (path === '/api/folders' && method === 'POST') {
+          return await handleCreateFolder(request, env);
+        }
+
+        if (path.startsWith('/api/files')) {
+          const filePath = path.slice('/api/files'.length) || '/';
+
+          if (method === 'GET') {
+            return await handleListFiles(request, env, filePath);
+          }
+          if (method === 'POST') {
+            return await handleUploadFile(request, env, filePath);
+          }
+          if (method === 'PUT') {
+            return await handleRenameFile(request, env, filePath);
+          }
+          if (method === 'DELETE') {
+            return await handleDeleteFile(request, env, filePath);
+          }
+        }
+
+        if (path.startsWith('/api/download')) {
+          return await serveFile(request, env, path.slice('/api/download'.length), { download: true });
+        }
+
+        if (path.startsWith('/api/preview')) {
+          return await serveFile(request, env, path.slice('/api/preview'.length), { cache: true });
+        }
+
+        if (path.startsWith('/api/edit')) {
+          return await handleEditFile(request, env, path.slice('/api/edit'.length));
+        }
+
+        if (path === '/api/share' && method === 'POST') {
+          return await handleCreateShare(request, env);
+        }
+
+        if (path.match(/^\/api\/share\/[^/]+$/) && method === 'GET') {
+          const shareId = path.split('/').pop();
+          return await handleGetShareInfo(request, env, shareId);
+        }
+
+        if (path.match(/^\/api\/share\/[^/]+\/download$/) && method === 'POST') {
+          const shareId = path.split('/')[3];
+          return await handleShareDownload(request, env, shareId);
+        }
+
+        if (path === '/api/admin/stats' && method === 'GET') {
+          return await handleGetStats(request, env);
+        }
+
+        if (path === '/api/admin/shares' && method === 'GET') {
+          return await handleListShares(request, env);
+        }
+
+        if (path.match(/^\/api\/admin\/shares\/[^/]+$/) && method === 'DELETE') {
+          const shareId = path.split('/').pop();
+          return await handleDeleteShare(request, env, shareId);
+        }
+
+        if (path === '/api/admin/users' && method === 'GET') {
+          return await handleListUsers(request, env);
+        }
+
+        if (path === '/api/admin/users' && method === 'POST') {
+          return await handleCreateUser(request, env);
+        }
+
+        if (path.match(/^\/api\/admin\/users\/[^/]+$/) && method === 'DELETE') {
+          const email = path.split('/').pop();
+          return await handleDeleteUser(request, env, email);
+        }
+
+        if (path === '/api/admin/settings' && method === 'GET') {
+          return await handleGetSettings(request, env);
+        }
+
+        if (path === '/api/admin/settings' && method === 'PUT') {
+          return await handleUpdateSettings(request, env);
+        }
+
+        if (path.match(/^\/api\/admin\/users\/[^/]+\/settings$/) && method === 'GET') {
+          const email = path.split('/')[4];
+          return await handleGetUserSettings(request, env, decodeURIComponent(email));
+        }
+
+        if (path.match(/^\/api\/admin\/users\/[^/]+\/settings$/) && method === 'PUT') {
+          const email = path.split('/')[4];
+          return await handleUpdateUserSettings(request, env, decodeURIComponent(email));
+        }
+
+        if (path === '/api/search' && method === 'GET') {
+          return await handleSearchFiles(request, env);
+        }
+
+        if (path === '/api/favorites' && method === 'GET') {
+          return await handleGetFavorites(request, env);
+        }
+        if (path === '/api/favorites' && method === 'POST') {
+          return await handleAddFavorite(request, env);
+        }
+        if (path === '/api/favorites' && method === 'DELETE') {
+          return await handleRemoveFavorite(request, env);
+        }
+        if (path === '/api/favorites/order' && method === 'PUT') {
+          return await handleReorderFavorites(request, env);
+        }
+
+        return jsonResponse({ success: false, message: 'API 路径不存在' }, 404);
+      }
+
+      if (path.startsWith('/s/')) {
+        return htmlResponse(SHARE_PAGE);
       }
 
       if (path === '/login.html' || path === '/login') {
         return htmlResponse(LOGIN_PAGE);
+      }
+
+      if (path === '/admin.html' || path === '/admin') {
+        const auth = await verifyAuth(request, env);
+        if (!auth) {
+          return Response.redirect(url.origin + '/login.html', 302);
+        }
+        const initJson = JSON.stringify({ role: auth.role, email: auth.email || null });
+        return htmlResponse(ADMIN_PAGE.replace('</head>', `<script>window.__INIT__=${initJson};</script></head>`));
       }
 
       if (path === '/' || path === '/index.html') {
@@ -3585,9 +5269,24 @@ export default {
         if (!auth) {
           return Response.redirect(url.origin + '/login.html', 302);
         }
-        const favRaw = await env.KV_STORE.get('favorites:admin');
+        // 预加载 favorites，嵌入 HTML 省掉前端一次 KV 读取
+        const favKey = getFavoritesKey(auth);
+        const favRaw = await env.KV_STORE.get(favKey);
         const favorites = favRaw ? JSON.parse(favRaw) : [];
-        return htmlResponse(INDEX_PAGE.replace('</head>', `<script>window.__INIT__=${JSON.stringify({favorites})};</script></head>`));
+        const initData = {
+          role: auth.role,
+          email: auth.email || null,
+          favorites: favorites || []
+        };
+        if (auth.role === 'guest') {
+          const limits = await getUserLimits(env, '__guest__');
+          const allowedFolders = (limits && limits.allowedFolders && limits.allowedFolders.length > 0)
+            ? limits.allowedFolders
+            : ['guest'];
+          initData.guestRoot = allowedFolders[0];
+        }
+        const initJson = JSON.stringify(initData);
+        return htmlResponse(INDEX_PAGE.replace('</head>', `<script>window.__INIT__=${initJson};</script></head>`));
       }
 
       return Response.redirect(url.origin + '/', 302);

@@ -13,6 +13,10 @@
  * ADMIN_PASSWORD = "你的管理员密码"
  */
 
+// ============================================================
+// 工具函数
+// ============================================================
+
 function getMimeType(filename) {
   const ext = filename.split('.').pop().toLowerCase();
   const mimeTypes = {
@@ -61,6 +65,10 @@ function formatTime(dateStr) {
   return d.toLocaleDateString('zh-CN') + ' ' + d.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
 }
 
+// ============================================================
+// R2 辅助函数
+// ============================================================
+
 async function deleteR2Folder(env, key) {
   let cursor;
   do {
@@ -108,6 +116,10 @@ async function parseDavDestination(request, davPath) {
   }
 }
 
+// ============================================================
+// XML 辅助（WebDAV）
+// ============================================================
+
 function xmlEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -124,7 +136,12 @@ function davXmlResponse(body, status = 207) {
   });
 }
 
+// ============================================================
+// 认证
+// ============================================================
+
 async function verifyAuth(request, env) {
+  // HTTP Basic Auth
   const authHeader = request.headers.get('Authorization');
   if (authHeader && authHeader.startsWith('Basic ')) {
     try {
@@ -134,6 +151,7 @@ async function verifyAuth(request, env) {
       if (pass === env.ADMIN_PASSWORD) return { role: 'admin' };
     } catch {}
   }
+  // Cookie / Bearer JWT（网页登录用）
   const cookie = request.headers.get('Cookie') || '';
   const match = cookie.match(/token=([^;]+)/);
   if (match) {
@@ -166,6 +184,10 @@ function makeToken(pass) {
 function makeTokenCookie(token) {
   return `token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${86400 * 7}`;
 }
+
+// ============================================================
+// 网页 UI
+// ============================================================
 
 const CSS_STYLES = `<style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -390,6 +412,7 @@ async function doRename() {
   if(data.success) { hideRename(); loadFiles(); }
 }
 
+// 上传
 const SMALL = 1*1024*1024;
 document.getElementById('fileInput').addEventListener('change', async e => {
   const files = e.target.files;
@@ -465,6 +488,10 @@ loadFiles();
 </body>
 </html>`;
 }
+
+// ============================================================
+// API 处理（网页UI用）
+// ============================================================
 
 async function handleApiLogin(request, env) {
   try {
@@ -625,6 +652,10 @@ function jsonResponse(data, status = 200) {
     headers: { 'Content-Type': 'application/json' }
   });
 }
+
+// ============================================================
+// WebDAV 方法处理
+// ============================================================
 
 function handleDavOptions() {
   return new Response(null, {
@@ -958,12 +989,17 @@ function requireDavAuth(request, resType = 'text') {
   return new Response('Unauthorized', { status: 401, headers });
 }
 
+// ============================================================
+// 主路由
+// ============================================================
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = decodeURIComponent(url.pathname);
     const method = request.method;
 
+    // CORS preflight
     if (method === 'OPTIONS') {
       if (path.startsWith('/dav')) {
         return new Response(null, {
@@ -978,6 +1014,7 @@ export default {
     }
 
     try {
+      // 网页UI路由
       if (path === '/login' && method === 'GET') {
         return new Response(LOGIN_PAGE, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
@@ -985,6 +1022,8 @@ export default {
       if (path === '/api/login' && method === 'POST') {
         return await handleApiLogin(request, env);
       }
+
+      // 需要认证的网页路由
       const auth = await verifyAuth(request, env);
 
       if (path === '/' || path === '/index.html') {
@@ -994,11 +1033,14 @@ export default {
         return new Response(getIndexPage(currentPath), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
 
+      // API路由
       if (path === '/api/list') return await handleApiList(request, env);
       if (path === '/api/upload') return await handleApiUpload(request, env);
       if (path === '/api/delete') return await handleApiDelete(request, env);
       if (path === '/api/mkdir') return await handleApiMkdir(request, env);
       if (path === '/api/rename') return await handleApiRename(request, env);
+
+      // 文件下载
       if (path === '/api/download') {
         if (!auth) return new Response('Unauthorized', { status: 401 });
         const filePath = normalizePath(url.searchParams.get('path') || '');
@@ -1014,6 +1056,8 @@ export default {
           }
         });
       }
+
+      // WebDAV路由
       if (path.startsWith('/dav/') || path === '/dav') {
         let davPath = path === '/dav' ? '' : path.slice(5);
         if (davPath.startsWith('/')) davPath = davPath.slice(1);

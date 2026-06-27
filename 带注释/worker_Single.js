@@ -136,12 +136,31 @@ function getMimeType(filename) {
 
 function getPreviewType(filename) {
   const ext = filename.split('.').pop().toLowerCase();
-  if (['jpg','jpeg','png','gif','webp','svg','ico','bmp'].includes(ext)) return 'image';
-  if (ext === 'pdf') return 'pdf';
-  if (['txt','md','json','js','ts','css','html','htm','xml','yaml','yml','ini','conf','cfg','sh','py','php','java','c','cpp','go','rs','rb','lua','sql','csv','log','bat','ps1','vue','tsx','jsx','toml','properties','pl','dart','tf','proto'].includes(ext)) return 'text';
-  if (ext === 'docx') return 'word';
-  if (['mp4','webm','ogg'].includes(ext)) return 'video';
-  if (['mp3','wav','flac','m4a'].includes(ext)) return 'audio';
+
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico', 'bmp'].includes(ext)) {
+    return 'image';
+  }
+
+  if (ext === 'pdf') {
+    return 'pdf';
+  }
+
+  if (['txt', 'md', 'json', 'js', 'ts', 'css', 'html', 'htm', 'xml', 'yaml', 'yml', 'ini', 'conf', 'cfg', 'sh', 'bash', 'zsh', 'py', 'php', 'java', 'c', 'cpp', 'h', 'hpp', 'go', 'rs', 'rb', 'lua', 'swift', 'kt', 'scala', 'r', 'vue', 'tsx', 'jsx', 'toml', 'csv', 'sql', 'log', 'bat', 'ps1', 'makefile', 'dockerfile', 'gitignore', 'env', 'properties', 'pl', 'pm', 'coffee', 'dart', 'tf', 'proto'].includes(ext)) {
+    return 'text';
+  }
+
+  if (ext === 'docx') {
+    return 'word';
+  }
+
+  if (['mp4', 'webm', 'ogg'].includes(ext)) {
+    return 'video';
+  }
+
+  if (['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(ext)) {
+    return 'audio';
+  }
+
   return null;
 }
 
@@ -157,18 +176,29 @@ function parseCookies(request) {
   return cookies;
 }
 
-function jsonResponse(data, status = 200, extraHeaders = {}) {
+function jsonResponse(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
-    status, headers: { 'Content-Type': 'application/json', ...extraHeaders }
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers
+    }
   });
 }
 
-function htmlResponse(html, status = 200, extraHeaders = {}) {
+function htmlResponse(html, status = 200, headers = {}) {
   return new Response(html, {
-    status, headers: { 'Content-Type': 'text/html; charset=utf-8', ...extraHeaders }
+    status,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      ...headers
+    }
   });
 }
 
+// --- R2 辅助函数 ---
+
+// 递归删除 R2 文件夹（前缀 key + '/' 的所有对象 + 文件夹本身）
 async function deleteR2Folder(env, key) {
   let cursor;
   do {
@@ -181,6 +211,7 @@ async function deleteR2Folder(env, key) {
   await env.R2_BUCKET.delete(key);
 }
 
+// 递归复制 R2 文件夹（srcKey -> dstKey），不删除源
 async function copyR2Folder(env, srcKey, dstKey) {
   let cursor;
   do {
@@ -202,20 +233,23 @@ async function copyR2Folder(env, srcKey, dstKey) {
   } while (cursor);
 }
 
+// 解析 WebDAV MOVE/COPY 的 Destination header，返回 { srcKey, dstKey }
+// 解析失败直接返回 Response 错误
 async function parseDavDestination(request, davPath) {
   const destHeader = request.headers.get('Destination');
   if (!destHeader) return new Response('Missing Destination header', { status: 400 });
   try {
     const destUrl = new URL(destHeader);
     let destPath = destUrl.pathname;
-    if (destPath === '/dav' || destPath === '/dav/') destPath = '';
-    else if (destPath.startsWith('/dav/')) destPath = destPath.slice(5);
+    if (destPath.startsWith('/dav/')) destPath = destPath.slice(5);
     if (destPath.startsWith('/')) destPath = destPath.slice(1);
     return { srcKey: davPath, dstKey: destPath.replace(/\/$/, '') };
   } catch {
     return new Response('Invalid Destination URL', { status: 400 });
   }
 }
+
+// --- 认证相关 ---
 
 async function handleLogin(request, env) {
   try {
@@ -252,12 +286,18 @@ async function requireAuth(request, env) {
   return auth;
 }
 
+// --- 文件操作辅助函数 ---
+
 function normalizePath(p) {
   if (!p) return '';
   if (p.startsWith('/')) p = p.slice(1);
   return p;
 }
 
+function normalizeFolder(f) {
+  if (!f) return '';
+  return f.replace(/^\/+|\/+$/g, '');
+}
 
 async function handleListFiles(request, env, path) {
   const auth = await requireAuth(request, env);
@@ -354,42 +394,59 @@ async function handleSearchFiles(request, env) {
   }
 }
 
-async function handleFavorites(request, env) {
+async function handleGetFavorites(request, env) {
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
-  const key = 'favorites:admin';
-  if (request.method === 'GET') {
-    const data = await env.KV_STORE.get(key);
-    return jsonResponse({ success: true, favorites: data ? JSON.parse(data) : [] }, 200, { 'Cache-Control': 'private, max-age=5' });
-  }
-  if (request.method === 'POST') {
-    const { name, path } = await request.json();
-    if (!name || !path) return jsonResponse({ success: false, message: '缺少参数' }, 400);
-    const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
-    if (favorites.some(f => f.path === path)) return jsonResponse({ success: false, message: '已在收藏夹中' });
-    favorites.push({ name, path });
+  const data = await env.KV_STORE.get(getFavoritesKey());
+  return jsonResponse({ success: true, favorites: data ? JSON.parse(data) : [] }, 200, { 'Cache-Control': 'private, max-age=5' });
+}
+
+async function handleAddFavorite(request, env) {
+  const auth = await requireAuth(request, env);
+  if (auth instanceof Response) return auth;
+
+  const { name, path } = await request.json();
+  if (!name || !path) return jsonResponse({ success: false, message: '缺少参数' }, 400);
+
+  const key = getFavoritesKey();
+  const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
+  if (favorites.some(f => f.path === path)) return jsonResponse({ success: false, message: '已在收藏夹中' });
+  favorites.push({ name, path });
+  await env.KV_STORE.put(key, JSON.stringify(favorites));
+  return jsonResponse({ success: true, favorites });
+}
+
+async function handleRemoveFavorite(request, env) {
+  const auth = await requireAuth(request, env);
+  if (auth instanceof Response) return auth;
+
+  const index = parseInt(new URL(request.url).searchParams.get('index'));
+  const key = getFavoritesKey();
+  const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
+  if (isNaN(index) || index < 0 || index >= favorites.length) return jsonResponse({ success: false, message: '无效索引' }, 400);
+
+  favorites.splice(index, 1);
+  await env.KV_STORE.put(key, JSON.stringify(favorites));
+  return jsonResponse({ success: true, favorites });
+}
+
+async function handleReorderFavorites(request, env) {
+  const auth = await requireAuth(request, env);
+  if (auth instanceof Response) return auth;
+
+  try {
+    const { favorites } = await request.json();
+    if (!Array.isArray(favorites)) return jsonResponse({ success: false, message: '无效数据' }, 400);
+    const key = getFavoritesKey();
     await env.KV_STORE.put(key, JSON.stringify(favorites));
     return jsonResponse({ success: true, favorites });
+  } catch (e) {
+    return jsonResponse({ success: false, message: '保存顺序失败: ' + e.message }, 500);
   }
-  if (request.method === 'DELETE') {
-    const index = parseInt(new URL(request.url).searchParams.get('index'));
-    const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
-    if (isNaN(index) || index < 0 || index >= favorites.length) return jsonResponse({ success: false, message: '无效索引' }, 400);
-    favorites.splice(index, 1);
-    await env.KV_STORE.put(key, JSON.stringify(favorites));
-    return jsonResponse({ success: true, favorites });
-  }
-  if (request.method === 'PUT') {
-    try {
-      const { favorites } = await request.json();
-      if (!Array.isArray(favorites)) return jsonResponse({ success: false, message: '无效数据' }, 400);
-      await env.KV_STORE.put(key, JSON.stringify(favorites));
-      return jsonResponse({ success: true, favorites });
-    } catch (e) {
-      return jsonResponse({ success: false, message: '保存顺序失败: ' + e.message }, 500);
-    }
-  }
-  return jsonResponse({ success: false, message: '方法不支持' }, 405);
+}
+
+function getFavoritesKey() {
+  return 'favorites:admin';
 }
 
 async function handleUploadFile(request, env, path) {
@@ -472,7 +529,7 @@ async function handleCreateFolder(request, env) {
 
     if (!folderPath.endsWith('/')) folderPath += '/';
 
-    await env.R2_BUCKET.put(folderPath + '.keep', new Uint8Array(0));
+    await env.R2_BUCKET.put(folderPath + '.folder', new Uint8Array(0));
 
     return jsonResponse({ success: true, message: '文件夹创建成功', path: '/' + folderPath.slice(0, -1) });
   } catch (e) {
@@ -561,6 +618,10 @@ async function handleCheckAuth(request, env) {
   return jsonResponse({ authenticated: true });
 }
 
+// ============================================================
+//  WebDAV 支持 —— 挂载在 /dav/ 路径下
+// ============================================================
+
 function xmlEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -577,29 +638,11 @@ function davXmlResponse(body, status = 207) {
   });
 }
 
-const DAV_CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, HEAD, PUT, DELETE, OPTIONS, PROPFIND, MKCOL, MOVE, COPY, LOCK, UNLOCK',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Depth, Destination, Overwrite, Range',
-  'Access-Control-Expose-Headers': 'Content-Length, Content-Type, ETag, Last-Modified, DAV'
-};
-
-function getDavLockResponse() {
-  return new Response('<?xml version="1.0" encoding="utf-8"?>\n<d:prop xmlns:d="DAV:">\n  <d:lockdiscovery>\n    <d:activelock>\n      <d:locktype><d:write/></d:locktype>\n      <d:lockscope><d:exclusive/></d:lockscope>\n      <d:depth>infinity</d:depth>\n      <d:timeout>Second-3600</d:timeout>\n      <d:locktoken>\n        <d:href>urn:uuid:00000000-0000-0000-0000-000000000000</d:href>\n      </d:locktoken>\n    </d:activelock>\n  </d:lockdiscovery>\n</d:prop>', {
-    status: 200,
-    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Lock-Token': '<urn:uuid:00000000-0000-0000-0000-000000000000>' }
-  });
-}
-
-function withDavCors(res) {
-  const headers = new Headers(res.headers);
-  for (const [k, v] of Object.entries(DAV_CORS)) headers.set(k, v);
-  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
-}
-
+// WebDAV Basic Auth 验证
 async function verifyDavAuth(request, env) {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Basic ')) {
+    // 也尝试 Cookie JWT（方便浏览器调试）
     return await verifyAuth(request, env);
   }
   const base64 = authHeader.slice(6);
@@ -617,6 +660,7 @@ async function verifyDavAuth(request, env) {
 }
 
 function requireDavAuth(request, env, resType = 'json') {
+  // 返回 WWW-Authenticate 头让客户端弹出登录框
   if (resType === 'xml') {
     return davXmlResponse(
       '<d:error xmlns:d="DAV:"><d:responsedescription>Unauthorized</d:responsedescription></d:error>',
@@ -632,6 +676,18 @@ function requireDavAuth(request, env, resType = 'json') {
   });
 }
 
+// OPTIONS — 声明 WebDAV 能力
+function handleDavOptions(path) {
+  const headers = {
+    'Allow': 'OPTIONS,GET,HEAD,PUT,DELETE,PROPFIND,MKCOL,MOVE,COPY,LOCK,UNLOCK',
+    'DAV': '1, 2',
+    'MS-Author-Via': 'DAV',
+    'Content-Length': '0'
+  };
+  return new Response(null, { status: 200, headers });
+}
+
+// PROPFIND — 列出文件和文件夹
 async function handleDavPropfind(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request, env, 'xml');
@@ -639,6 +695,8 @@ async function handleDavPropfind(request, env, davPath) {
   try {
     const depth = request.headers.get('Depth') || 'infinity';
     const baseUrl = new URL(request.url).origin + '/dav/';
+
+    // 先检查路径是否是文件 —— 文件路径的 PROPFIND 返回单文件属性
     const fileObj = davPath ? await env.R2_BUCKET.get(davPath) : null;
     if (fileObj) {
       const name = davPath.split('/').pop();
@@ -662,6 +720,8 @@ async function handleDavPropfind(request, env, davPath) {
 </d:multistatus>`;
       return new Response(xml, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
     }
+
+    // 目录路径 —— 列出内容
     const prefix = davPath ? davPath + '/' : '';
     const objects = [];
     let folders = new Set();
@@ -675,7 +735,7 @@ async function handleDavPropfind(request, env, davPath) {
       });
       if (batch.objects) {
         for (const obj of batch.objects) {
-          if (obj.key.endsWith('/.keep') || obj.key.endsWith('/.folder')) continue;
+          if (obj.key.endsWith('/.keep')) continue;
           objects.push(obj);
         }
       }
@@ -689,7 +749,10 @@ async function handleDavPropfind(request, env, davPath) {
     } while (cursor);
 
     let xml = '<d:multistatus xmlns:d="DAV:">\n';
-    xml += `  <d:response>
+
+    // 当前目录本身
+    if (depth !== '1') {
+      xml += `  <d:response>
     <d:href>${xmlEscape(baseUrl + (davPath ? davPath + '/' : ''))}</d:href>
     <d:propstat>
       <d:prop>
@@ -702,11 +765,14 @@ async function handleDavPropfind(request, env, davPath) {
       <d:status>HTTP/1.1 200 OK</d:status>
     </d:propstat>
   </d:response>\n`;
+    }
 
     if (depth === '0') {
       xml += '</d:multistatus>';
       return davXmlResponse(xml);
     }
+
+    // 子文件夹
     for (const folderName of folders) {
       const folderPath = (davPath ? davPath + '/' : '') + folderName;
       xml += `  <d:response>
@@ -723,6 +789,8 @@ async function handleDavPropfind(request, env, davPath) {
     </d:propstat>
   </d:response>\n`;
     }
+
+    // 子文件
     for (const obj of objects) {
       const objPath = obj.key;
       const name = objPath.split('/').pop();
@@ -754,63 +822,54 @@ async function handleDavPropfind(request, env, davPath) {
     );
   }
 }
+
+// GET —— 下载文件（WebDAV 路径）
 async function handleDavGet(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request, env);
 
   try {
     let key = davPath;
+    // 如果是目录，返回 PROPFIND
     const obj = await env.R2_BUCKET.get(key);
     if (!obj) {
+      // 可能是目录
       const list = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
       if (list.objects?.length > 0 || list.delimitedPrefixes?.length > 0) {
-        return new Response('Method Not Allowed: GET on collection', { status: 405, headers: { 'Allow': 'OPTIONS,PROPFIND' } });
+        return handleDavPropfind(request, env, davPath);
       }
       return new Response('Not Found', { status: 404 });
     }
 
     const filename = key.split('/').pop();
-    const rangeHeader = request.headers.get('Range');
-    let objToServe, status, rangeHeaders;
+    const headers = {
+      'Content-Type': obj.httpMetadata?.contentType || getMimeType(filename),
+      'Content-Length': obj.size,
+      'ETag': obj.etag ? `"${obj.etag}"` : '',
+      'Last-Modified': rfc1123Date(new Date(obj.uploaded))
+    };
 
+    // 支持 Range 请求
+    const rangeHeader = request.headers.get('Range');
     if (rangeHeader) {
       const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
       if (match) {
         const start = parseInt(match[1]);
         const end = match[2] ? parseInt(match[2]) : obj.size - 1;
-        if (start >= obj.size || end >= obj.size) {
-          return new Response('Range Not Satisfiable', { status: 416, headers: { 'Content-Range': `bytes */${obj.size}` } });
-        }
-        objToServe = await env.R2_BUCKET.get(key, { range: { offset: start, length: end - start + 1 } });
-        status = 206;
-        rangeHeaders = {
-          'Content-Range': `bytes ${start}-${end}/${obj.size}`,
-          'Content-Length': end - start + 1,
-        };
-      } else {
-        objToServe = obj;
-        status = 200;
-        rangeHeaders = { 'Content-Length': obj.size };
+        headers['Content-Range'] = `bytes ${start}-${end}/${obj.size}`;
+        headers['Content-Length'] = end - start + 1;
+        // R2 range 通过自定义读取实现...
+        // Cloudflare Worker 环境下简单返回完整内容
       }
-    } else {
-      objToServe = obj;
-      status = 200;
-      rangeHeaders = { 'Content-Length': obj.size };
     }
 
-    const headers = {
-      'Content-Type': objToServe.httpMetadata?.contentType || obj.httpMetadata?.contentType || getMimeType(filename),
-      'ETag': obj.etag ? `"${obj.etag}"` : '',
-      'Last-Modified': rfc1123Date(new Date(obj.uploaded)),
-      'Accept-Ranges': 'bytes',
-      ...rangeHeaders
-    };
-
-    return new Response(objToServe.body, { status, headers });
+    return new Response(obj.body, { status: 200, headers });
   } catch (e) {
     return new Response('Internal Server Error: ' + e.message, { status: 500 });
   }
 }
+
+// HEAD —— 获取文件头信息
 async function handleDavHead(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request, env);
@@ -819,6 +878,7 @@ async function handleDavHead(request, env, davPath) {
     const key = davPath;
     const obj = await env.R2_BUCKET.get(key);
     if (!obj) {
+      // 检查是否是目录
       const list = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
       if (list.objects?.length > 0 || list.delimitedPrefixes?.length > 0) {
         return new Response(null, { status: 200, headers: { 'Content-Type': 'httpd/unix-directory' } });
@@ -840,6 +900,8 @@ async function handleDavHead(request, env, davPath) {
     return new Response(null, { status: 500 });
   }
 }
+
+// PUT —— 上传文件（WebDAV raw body）
 async function handleDavPut(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request, env);
@@ -847,62 +909,77 @@ async function handleDavPut(request, env, davPath) {
   try {
     const key = davPath;
     const overwrite = request.headers.get('Overwrite') !== 'F';
+
+    // 检查目标是否是文件夹（文件夹不能被 PUT 覆盖）
     const folderCheck = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
     if (folderCheck.objects?.length > 0 || folderCheck.delimitedPrefixes?.length > 0) {
       return new Response('Target is a collection', { status: 405 });
     }
+
+    // 检查目标文件是否已存在，若不允覆盖则返回 412
     if (!overwrite) {
-      const existing = await env.R2_BUCKET.head(key);
+      const existing = await env.R2_BUCKET.get(key);
       if (existing) return new Response(null, { status: 412 });
     }
+
     const contentType = request.headers.get('Content-Type') || getMimeType(key) || 'application/octet-stream';
-    const existed = await env.R2_BUCKET.head(key);
+
     await env.R2_BUCKET.put(key, request.body, {
       httpMetadata: { contentType }
     });
-    return new Response(null, { status: existed ? 204 : 201 });
+
+    return new Response(null, { status: 201 });
   } catch (e) {
     return new Response('Upload failed: ' + e.message, { status: 500 });
   }
 }
+
+// DELETE —— 删除文件/文件夹
 async function handleDavDelete(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request, env);
 
   try {
-    const obj = await env.R2_BUCKET.get(davPath);
-    const list = await env.R2_BUCKET.list({ prefix: davPath + '/', delimiter: '/', limit: 1 });
-    const exists = obj || (list.objects?.length > 0 || list.delimitedPrefixes?.length > 0);
-    if (!exists) return new Response(null, { status: 404 });
     await deleteR2Folder(env, davPath);
     return new Response(null, { status: 204 });
   } catch (e) {
     return new Response('Delete failed: ' + e.message, { status: 500 });
   }
 }
+
+// MKCOL —— 创建目录
 async function handleDavMkcol(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request, env);
 
   try {
     const key = davPath;
+
+    // 检查是否已有同名文件
     const existing = await env.R2_BUCKET.get(key);
     if (existing) {
       return new Response(null, { status: 405, headers: { 'Allow': 'GET,OPTIONS,PROPFIND' } });
     }
+
+    // 检查目录是否已存在
     const existingDir = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
     if (existingDir.objects?.length > 0 || existingDir.delimitedPrefixes?.length > 0) {
-      return new Response(null, { status: 405, headers: { 'Allow': 'GET,OPTIONS,PROPFIND,DELETE' } });
+      return new Response(null, { status: 201 }); // 目录已存在，返回成功
     }
+
+    // R2 没有真正目录，写一个 .keep 占位文件
     const keepKey = key + '/.keep';
     await env.R2_BUCKET.put(keepKey, '', {
       httpMetadata: { contentType: 'text/plain' }
     });
+
     return new Response(null, { status: 201 });
   } catch (e) {
     return new Response('MKCOL failed: ' + e.message, { status: 500 });
   }
 }
+
+// MOVE —— 移动/重命名
 async function handleDavMove(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request, env);
@@ -916,6 +993,7 @@ async function handleDavMove(request, env, davPath) {
 
     const srcObj = await env.R2_BUCKET.get(srcKey);
     if (!srcObj) {
+      // 源是文件夹
       const srcCheck = await env.R2_BUCKET.list({ prefix: srcKey + '/', delimiter: '/', limit: 1 });
       if (!srcCheck.objects?.length && !srcCheck.delimitedPrefixes?.length) {
         return new Response('Not Found', { status: 404 });
@@ -924,6 +1002,8 @@ async function handleDavMove(request, env, davPath) {
       await deleteR2Folder(env, srcKey);
       return new Response(null, { status: 201 });
     }
+
+    // 移动单个文件
     if (!overwrite) {
       const destExists = await env.R2_BUCKET.get(dstKey);
       if (destExists) return new Response(null, { status: 412 });
@@ -935,6 +1015,8 @@ async function handleDavMove(request, env, davPath) {
     return new Response('MOVE failed: ' + e.message, { status: 500 });
   }
 }
+
+// COPY —— 复制
 async function handleDavCopy(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request, env);
@@ -950,6 +1032,7 @@ async function handleDavCopy(request, env, davPath) {
     const srcObj = await env.R2_BUCKET.get(srcKey);
 
     if (srcObj) {
+      // 复制单个文件
       if (!overwrite) {
         const destExists = await env.R2_BUCKET.get(dstKey);
         if (destExists) return new Response(null, { status: 412 });
@@ -957,6 +1040,8 @@ async function handleDavCopy(request, env, davPath) {
       await env.R2_BUCKET.put(dstKey, srcObj.body, { httpMetadata: srcObj.httpMetadata });
       return new Response(null, { status: 201 });
     }
+
+    // 检查是否是文件夹
     const srcList = await env.R2_BUCKET.list({ prefix: srcKey + '/', limit: 1 });
     if (srcList.objects?.length > 0 || srcList.delimitedPrefixes?.length > 0) {
       if (depth === '0') {
@@ -972,6 +1057,35 @@ async function handleDavCopy(request, env, davPath) {
     return new Response('COPY failed: ' + e.message, { status: 500 });
   }
 }
+
+// LOCK —— 锁存根（返回 unsupported 但客户端能继续）
+function handleDavLock() {
+  // 部分客户端需要 LOCK 响应才能写入，返回一个假的锁 token
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<d:prop xmlns:d="DAV:">
+  <d:lockdiscovery>
+    <d:activelock>
+      <d:locktype><d:write/></d:locktype>
+      <d:lockscope><d:exclusive/></d:lockscope>
+      <d:depth>infinity</d:depth>
+      <d:timeout>Second-3600</d:timeout>
+      <d:locktoken>
+        <d:href>urn:uuid:00000000-0000-0000-0000-000000000000</d:href>
+      </d:locktoken>
+    </d:activelock>
+  </d:lockdiscovery>
+</d:prop>`;
+  return new Response(xml, {
+    status: 200,
+    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Lock-Token': '<urn:uuid:00000000-0000-0000-0000-000000000000>' }
+  });
+}
+
+// UNLOCK —— 解锁存根
+function handleDavUnlock() {
+  return new Response(null, { status: 204 });
+}
+
 const CSS_STYLES = `
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1000,6 +1114,7 @@ const CSS_STYLES = `
     --blur: saturate(180%) blur(20px);
     --transition: 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
   }
+
   [data-theme="dark"] {
     --primary: #0A84FF;
     --primary-hover: #409cff;
@@ -1015,6 +1130,8 @@ const CSS_STYLES = `
     --shadow: 0 2px 8px rgba(0,0,0,0.5);
     --shadow-lg: 0 8px 30px rgba(0,0,0,0.6);
   }
+
+  /* Theme Toggle Button */
   .theme-toggle {
     background: none; border: 1px solid var(--border); border-radius: 50%;
     width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
@@ -1022,6 +1139,8 @@ const CSS_STYLES = `
     flex-shrink: 0;
   }
   .theme-toggle:hover { background: var(--surface-hover); }
+
+  /* Dark Mode Overrides */
   [data-theme="dark"] .header { background: rgba(28,28,30,0.72); }
   [data-theme="dark"] .btn-secondary { background: rgba(255,255,255,0.08); }
   [data-theme="dark"] .btn-secondary:hover { background: rgba(255,255,255,0.14); }
@@ -1073,6 +1192,8 @@ const CSS_STYLES = `
   .sidebar-divider { height: 1px; background: var(--border); margin: 8px 12px; }
   .main-content { flex: 1; min-width: 0; }
   .container { padding: 0; }
+
+  /* Buttons */
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
     padding: 8px 18px; border: none; border-radius: var(--radius-sm);
@@ -1100,6 +1221,8 @@ const CSS_STYLES = `
     background: #e0352b;
   }
   .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+  /* Forms */
   .form-group { margin-bottom: 18px; }
   .form-label {
     display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500;
@@ -1116,11 +1239,15 @@ const CSS_STYLES = `
     box-shadow: 0 0 0 3px rgba(0,122,255,0.15);
   }
   .form-select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2386868b' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 36px; }
+
+  /* Cards */
   .card {
     padding: 0; position: relative;
   }
   .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
   .card-title { font-size: 18px; font-weight: 600; }
+
+  /* Header */
   .header {
     background: rgba(255,255,255,0.72); backdrop-filter: var(--blur);
     -webkit-backdrop-filter: var(--blur);
@@ -1133,6 +1260,8 @@ const CSS_STYLES = `
     letter-spacing: -0.02em;
   }
   .header-actions { display: flex; gap: 8px; }
+
+  /* Search */
   .search-group { display: flex; align-items: stretch; flex: 1; max-width: 420px; margin: 0 16px; position: relative; }
   .search-box { position: relative; flex: 1; }
   .search-input {
@@ -1181,6 +1310,8 @@ const CSS_STYLES = `
   .search-result-size { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
   .search-empty { padding: 16px; text-align: center; color: var(--text-muted); font-size: 13px; }
   .search-result-name mark { background: rgba(0,122,255,0.15); color: var(--primary); font-weight: 600; border-radius: 2px; padding: 0 1px; }
+
+  /* Breadcrumb */
   .breadcrumb {
     display: flex; align-items: center; gap: 2px;
     padding: 4px 0; flex-wrap: wrap; font-size: 14px;
@@ -1189,6 +1320,8 @@ const CSS_STYLES = `
   .breadcrumb-item:hover { color: var(--primary); }
   .breadcrumb-item.active { color: var(--text); font-weight: 500; }
   .breadcrumb-separator { color: var(--border-strong); margin: 0 2px; }
+
+  /* Nav Buttons (Back/Forward) */
   .nav-btn {
     width: 26px; height: 26px; border: 1px solid var(--border);
     border-radius: var(--radius-sm); background: var(--surface);
@@ -1198,6 +1331,8 @@ const CSS_STYLES = `
   }
   .nav-btn:hover:not(:disabled) { background: rgba(0,122,255,0.1); color: var(--primary); border-color: var(--primary); }
   .nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* File Grid */
   .file-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 8px; min-height: 200px; position: relative;
@@ -1241,6 +1376,8 @@ const CSS_STYLES = `
   .file-meta {
     font-size: 11px; color: var(--text-muted); text-align: center;
   }
+
+  /* View Toggle */
   .view-toggle {
     display: flex; background: rgba(0,0,0,0.04); border-radius: var(--radius-sm);
     overflow: hidden;
@@ -1252,6 +1389,8 @@ const CSS_STYLES = `
   }
   .view-toggle-btn:hover { color: var(--text); }
   .view-toggle-btn.active { background: var(--primary); color: #fff; }
+
+  /* List View */
   .file-list { display: block !important; min-height: auto; }
   .file-list .file-item {
     display: grid; grid-template-columns: 36px 1fr 100px 80px 70px; align-items: center;
@@ -1273,6 +1412,8 @@ const CSS_STYLES = `
   .sortable-header { transition: color var(--transition); }
   .sortable-header:hover { color: var(--primary); }
   .sortable-header.active { color: var(--primary); }
+
+  /* Toolbar */
   .toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
   .selection-info {
     margin-left: auto; padding: 6px 14px; background: var(--primary);
@@ -1280,6 +1421,8 @@ const CSS_STYLES = `
     display: none; animation: fadeIn 0.2s ease;
   }
   .selection-info.active { display: inline-block; }
+
+  /* Modal */
   .modal-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.3); backdrop-filter: blur(4px);
@@ -1304,6 +1447,8 @@ const CSS_STYLES = `
     align-items: center; justify-content: center; transition: all var(--transition);
   }
   .modal-close:hover { background: rgba(0,0,0,0.06); color: var(--text); }
+
+  /* Preview */
   .preview-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.92); display: flex; flex-direction: column;
@@ -1350,6 +1495,8 @@ const CSS_STYLES = `
   .preview-markdown th, .preview-markdown td { border: 1px solid var(--border); padding: 8px 12px; }
   .preview-loading { display: flex; flex-direction: column; align-items: center; gap: 16px; color: rgba(255,255,255,0.8); }
   .preview-error { text-align: center; color: var(--error); }
+
+  /* Toast */
   .toast-container { position: fixed; top: 20px; right: 20px; z-index: 3000; display: flex; flex-direction: column; gap: 8px; }
   .toast {
     padding: 14px 18px; border-radius: var(--radius-sm); color: #fff; font-size: 14px;
@@ -1365,6 +1512,8 @@ const CSS_STYLES = `
   @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes selectPulse { 0% { background: rgba(0,122,255,0.08); } 50% { background: rgba(0,122,255,0.25); } 100% { background: transparent; } }
+
+  /* Tabs */
   .tabs {
     display: flex; gap: 4px; background: rgba(0,0,0,0.04); padding: 4px;
     border-radius: var(--radius); margin-bottom: 24px;
@@ -1379,6 +1528,8 @@ const CSS_STYLES = `
   .tab:hover:not(.active) { color: var(--text); }
   .tab-content { display: none; }
   .tab-content.active { display: block; animation: fadeIn 0.25s ease; }
+
+  /* Badge */
   .badge {
     display: inline-block; padding: 3px 8px; border-radius: 12px;
     font-size: 11px; font-weight: 600;
@@ -1386,6 +1537,8 @@ const CSS_STYLES = `
   .badge-success { background: rgba(52,199,89,0.12); color: var(--success); }
   .badge-error { background: rgba(255,59,48,0.12); color: var(--error); }
   .badge-info { background: rgba(0,122,255,0.12); color: var(--primary); }
+
+  /* Login container */
   .login-container {
     min-height: 100vh; display: flex; align-items: center; justify-content: center;
     background: linear-gradient(180deg, #f5f5f7 0%, #e8e8ed 100%); padding: 20px;
@@ -1398,8 +1551,12 @@ const CSS_STYLES = `
   .login-header { text-align: center; margin-bottom: 32px; }
   .login-logo { font-size: 28px; font-weight: 700; color: var(--text); margin-bottom: 4px; letter-spacing: -0.02em; }
   .login-subtitle { color: var(--text-muted); font-size: 15px; }
+
+  /* Empty State */
   .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
   .empty-icon { font-size: 56px; margin-bottom: 12px; opacity: 0.4; }
+
+  /* Loading */
   .spinner {
     width: 36px; height: 36px; border: 3px solid rgba(0,0,0,0.08);
     border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite;
@@ -1411,6 +1568,8 @@ const CSS_STYLES = `
     -webkit-backdrop-filter: blur(4px);
     display: flex; align-items: center; justify-content: center; z-index: 3000;
   }
+
+  /* Upload */
   .upload-overlay {
     position: absolute; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,122,255,0.06); border: 2px dashed var(--primary);
@@ -1442,6 +1601,8 @@ const CSS_STYLES = `
   .upload-progress-info { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--text-muted); }
   .upload-progress-filename { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .upload-progress-percentage { font-weight: 600; color: var(--primary); }
+
+  /* Context Menu */
   .context-menu {
     position: fixed; background: rgba(255,255,255,0.95);
     backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
@@ -1458,6 +1619,8 @@ const CSS_STYLES = `
   .context-menu-item:hover { background: rgba(0,122,255,0.06); color: var(--primary); }
   .context-menu-item.danger:hover { background: rgba(255,59,48,0.06); color: var(--error); }
   .context-menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+  /* Ace Editor */
   .editor-tool-btn {
     background: none; border: none; color: #86868b; cursor: pointer;
     font-size: 13px; padding: 3px 7px; border-radius: 4px; line-height: 1;
@@ -1495,6 +1658,10 @@ const CSS_STYLES = `
     position: absolute; right: 0; bottom: 20px; width: 14px; height: 14px;
     cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #555 50%); z-index: 2;
   }
+
+  /* Responsive */
+
+  /* Mobile sidebar toggle – hidden on desktop */
   .sidebar-toggle { display: none; }
   .sidebar-backdrop { display: none; }
   .mobile-upload-bar { display: none; }
@@ -1503,11 +1670,14 @@ const CSS_STYLES = `
     html { font-size: 15px; }
     body { -webkit-tap-highlight-color: transparent; }
 
+    /* Header – stack + compact */
     .header { padding: 10px 14px; gap: 8px; flex-wrap: wrap; }
     .logo { font-size: 18px; white-space: nowrap; }
     .search-group { max-width: 100%; width: 100%; margin: 0; order: 3; }
     .header-actions { width: auto; gap: 4px; }
     .header-actions .btn { padding: 6px 12px; font-size: 12px; }
+
+    /* Sidebar – hide by default, toggle via JS */
     .sidebar {
       position: fixed; top: 0; left: 0; bottom: 0; z-index: 500;
       width: 260px; background: var(--surface); box-shadow: var(--shadow-lg);
@@ -1525,6 +1695,8 @@ const CSS_STYLES = `
       background: rgba(0,0,0,0.3); backdrop-filter: blur(2px);
     }
     .sidebar-backdrop.active { display: block; }
+
+    /* Hamburger menu button */
     .sidebar-toggle {
       display: flex; width: 36px; height: 36px; border: 1px solid var(--border);
       border-radius: var(--radius-sm); background: var(--surface);
@@ -1536,12 +1708,20 @@ const CSS_STYLES = `
 
     .main-layout { flex-direction: column; padding: 0; gap: 0; }
     .main-content { width: 100%; }
+
+    /* Toolbar – hidden on mobile */
     .toolbar { display: none; }
+
+    /* Container */
     .container { padding: 0; }
+
+    /* File grid – 2 columns for mobile */
     .file-grid:not(.file-list) { grid-template-columns: repeat(2, 1fr); gap: 4px; min-height: 100px; }
     .file-item { padding: 5px 4px; gap: 1px; }
     .file-item .file-icon { font-size: 28px; }
     .file-item .file-name { font-size: 18px; line-height: 1.3; }
+
+    /* List view */
     .file-list .file-item { grid-template-columns: 40px 1fr 68px 50px; gap: 8px; padding: 8px 10px; align-items: center; }
     .file-list-header { grid-template-columns: 40px 1fr 68px 50px; gap: 8px; padding: 4px 10px; font-size: 12px; }
     .file-list .file-icon { font-size: 28px; flex-shrink: 0; }
@@ -1550,7 +1730,11 @@ const CSS_STYLES = `
     .file-list .file-meta:last-child { display: none; }
     .file-list-header > *:nth-child(4) { text-align: right; }
     .file-list-header > *:nth-child(5) { display: none; }
+
+    /* Breadcrumb */
     .breadcrumb { font-size: 12px; padding: 4px 12px; }
+
+    /* Modals */
     .modal { padding: 20px; width: 94%; max-width: 100%; border-radius: var(--radius-lg); }
     .modal-title { font-size: 16px; }
     .modal-overlay { align-items: flex-end; }
@@ -1558,16 +1742,28 @@ const CSS_STYLES = `
       border-radius: var(--radius-xl) var(--radius-xl) 0 0;
       max-height: 90vh; margin-bottom: 0;
     }
+
+    /* Login cards */
     .login-card { padding: 28px 20px; max-width: 100%; margin: 0 8px; border-radius: var(--radius-lg); }
     .login-container { padding: 12px; align-items: flex-start; padding-top: 10vh; }
+
+    /* Preview overlay */
     .preview-header { padding: 10px 14px; gap: 8px; }
     .preview-filename { font-size: 14px; }
     .preview-overlay .btn { padding: 6px 12px; font-size: 12px; }
+
+    /* Buttons – touch friendly */
     .btn { min-height: 40px; }
     .btn-sm { min-height: 32px; padding: 4px 10px; font-size: 11px; }
     .modal-close { width: 36px; height: 36px; font-size: 24px; }
+
+    /* Form inputs */
     .form-input, .form-select { padding: 10px 12px; font-size: 16px; }
+
+    /* Card – full width */
     .card { padding: 12px 8px; border-radius: 0; border: none; box-shadow: none; }
+
+    /* Footer upload bar (fixed bottom) */
     .mobile-upload-bar {
       display: flex; position: fixed; bottom: 0; left: 0; right: 0;
       padding: 10px 14px; padding-bottom: max(10px, env(safe-area-inset-bottom));
@@ -2074,6 +2270,7 @@ const INDEX_PAGE = `
 
       checkAuth().then(() => {
         updateNavButtons();
+        // 并行加载文件和收藏夹，互不依赖，减少等待时间
         Promise.all([loadFiles(), initFavorites()]).then(() => {
           initDragUpload();
           initContextMenu();
@@ -2085,6 +2282,7 @@ const INDEX_PAGE = `
 let favorites = [];
 
 async function initFavorites() {
+  // 优先使用服务端嵌入数据，省掉 /api/favorites KV 读取
   if (window.__INIT__ && window.__INIT__.favorites) {
     favorites = window.__INIT__.favorites;
     renderFavorites();
@@ -2175,12 +2373,14 @@ async function removeFavorite(index) {
   }
 }
 
+// --- 收藏夹拖拽排序 ---
 let _favDragIndex = -1;
 
 function onFavDragStart(event, index) {
   _favDragIndex = index;
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', index);
+  // 延迟添加 dragging 样式，避免截屏时包含它
   requestAnimationFrame(() => {
     event.target.classList.add('sidebar-item-dragging');
   });
@@ -2203,9 +2403,11 @@ async function onFavDrop(event, toIndex) {
   const fromIndex = _favDragIndex;
   if (fromIndex < 0 || fromIndex === toIndex) return;
 
+  // 本地重排
   const [moved] = favorites.splice(fromIndex, 1);
   favorites.splice(toIndex, 0, moved);
 
+  // 保存新顺序到服务端
   try {
     const response = await fetch('/api/favorites/order', {
       method: 'PUT',
@@ -2224,6 +2426,7 @@ async function onFavDrop(event, toIndex) {
   renderFavorites();
 }
 
+// 拖拽结束时清理
 document.addEventListener('dragend', () => {
   _favDragIndex = -1;
   document.querySelectorAll('.sidebar-item-dragging').forEach(el => el.classList.remove('sidebar-item-dragging'));
@@ -2482,6 +2685,7 @@ function handleItemClick(event, element) {
       selectSingle(element);
     }
   } else if (isMobile) {
+    // 移动端：点击直接打开
     const type = element.dataset.type;
     const path = element.dataset.path;
     if (type === 'folder') {
@@ -2815,6 +3019,7 @@ sortedFiles.forEach(file => {
       updateNavButtons();
       loadFiles();
       highlightCurrentFavorite();
+      // close mobile sidebar on navigate
       var sidebar = document.getElementById('sidebar');
       if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
     }
@@ -2917,6 +3122,8 @@ sortedFiles.forEach(file => {
 
     async function uploadFiles(files) {
       if (!files || files.length === 0) return;
+
+      // 上传前检测文件大小（100MB）
       var oversizedNames = [];
       for (var i = 0; i < files.length; i++) {
         if (files[i].size > 100 * 1024 * 1024) {
@@ -2942,12 +3149,16 @@ sortedFiles.forEach(file => {
       let failCount = 0;
       const totalFiles = files.length;
       const SMALL = 1 * 1024 * 1024;
+
+      // 分堆
       const smallFiles = [];
       const largeFiles = [];
       for (let i = 0; i < files.length; i++) {
         if (files[i].size <= SMALL) smallFiles.push(files[i]);
         else largeFiles.push(files[i]);
       }
+
+      // 上传一个大文件（逐个，有实时进度）
       async function uploadLarge(file) {
         progressFilename.textContent = file.name + ' (' + (successCount + failCount + 1) + '/' + totalFiles + ')';
         return new Promise((resolve) => {
@@ -2977,6 +3188,8 @@ sortedFiles.forEach(file => {
           xhr.send(fd);
         });
       }
+
+      // 先并发上传小文件
       if (smallFiles.length > 0) {
         progressFilename.textContent = '上传小文件...（' + smallFiles.length + ' 个）';
         await Promise.all(smallFiles.map(file => {
@@ -2999,6 +3212,8 @@ sortedFiles.forEach(file => {
           });
         }));
       }
+
+      // 再逐个上传大文件
       for (let i = 0; i < largeFiles.length; i++) {
         await uploadLarge(largeFiles[i]);
       }
@@ -3479,101 +3694,162 @@ export default {
     const path = decodeURIComponent(url.pathname);
     const method = request.method;
 
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, PROPFIND, MKCOL, MOVE, COPY, LOCK, UNLOCK',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Depth, Destination, Overwrite, Range',
+      'Access-Control-Expose-Headers': 'Content-Length, Content-Type, ETag, Last-Modified, DAV'
+    };
 
+    // 屏蔽无用请求，避免浪费 Worker 调用配额
     if (path === '/favicon.ico' || path === '/robots.txt' || path === '/.well-known' || path.startsWith('/.well-known/')) {
       return new Response(null, { status: 404 });
     }
 
     try {
+      // Windows WebDAV 客户端发送 OPTIONS * 探测服务器能力
       if (method === 'OPTIONS' && (path === '*' || request.url === '*')) {
-        return new Response(null, { status: 200, headers: {
-          'Allow': 'OPTIONS,GET,HEAD,PUT,DELETE,PROPFIND,MKCOL,MOVE,COPY,LOCK,UNLOCK',
-          'DAV': '1, 2',
-          'MS-Author-Via': 'DAV',
-          'Content-Length': '0',
-          ...DAV_CORS
-        }});
+        return handleDavOptions(null);
       }
+
+      // ============================================================
+      //  WebDAV 路由 —— /dav/ 路径
+      // ============================================================
       if (path.startsWith('/dav/') || path === '/dav') {
         let davPath = path === '/dav' ? '' : path.slice(5); // 去掉 "/dav/" 或 "/dav"
         if (davPath.startsWith('/')) davPath = davPath.slice(1);
         davPath = davPath.replace(/\/$/, '');
+
+        // OPTIONS — 能力声明
         if (method === 'OPTIONS') {
-          return new Response(null, { status: 200, headers: {
-            'Allow': 'OPTIONS,GET,HEAD,PUT,DELETE,PROPFIND,MKCOL,MOVE,COPY,LOCK,UNLOCK',
-            'DAV': '1, 2',
-            'MS-Author-Via': 'DAV',
-            'Content-Length': '0',
-            ...DAV_CORS
-          }});
-        }
-        if (method === 'PROPFIND') {
-          return withDavCors(await handleDavPropfind(request, env, davPath));
-        }
-        if (method === 'GET') {
-          return withDavCors(await handleDavGet(request, env, davPath));
-        }
-        if (method === 'HEAD') {
-          return withDavCors(await handleDavHead(request, env, davPath));
-        }
-        if (method === 'PUT') {
-          return withDavCors(await handleDavPut(request, env, davPath));
-        }
-        if (method === 'DELETE') {
-          return withDavCors(await handleDavDelete(request, env, davPath));
-        }
-        if (method === 'MKCOL') {
-          return withDavCors(await handleDavMkcol(request, env, davPath));
-        }
-        if (method === 'MOVE') {
-          return withDavCors(await handleDavMove(request, env, davPath));
-        }
-        if (method === 'COPY') {
-          return withDavCors(await handleDavCopy(request, env, davPath));
-        }
-        if (method === 'LOCK') {
-          return withDavCors(getDavLockResponse());
-        }
-        if (method === 'UNLOCK') {
-          return withDavCors(new Response(null, { status: 204 }));
+          return handleDavOptions(davPath);
         }
 
-        return withDavCors(new Response('Method Not Allowed', { status: 405 }));
+        // PROPFIND — 列出目录
+        if (method === 'PROPFIND') {
+          return await handleDavPropfind(request, env, davPath);
+        }
+
+        // GET — 下载文件
+        if (method === 'GET') {
+          return await handleDavGet(request, env, davPath);
+        }
+
+        // HEAD — 文件信息
+        if (method === 'HEAD') {
+          return await handleDavHead(request, env, davPath);
+        }
+
+        // PUT — 上传文件
+        if (method === 'PUT') {
+          return await handleDavPut(request, env, davPath);
+        }
+
+        // DELETE — 删除
+        if (method === 'DELETE') {
+          return await handleDavDelete(request, env, davPath);
+        }
+
+        // MKCOL — 创建目录
+        if (method === 'MKCOL') {
+          return await handleDavMkcol(request, env, davPath);
+        }
+
+        // MOVE — 移动/重命名
+        if (method === 'MOVE') {
+          return await handleDavMove(request, env, davPath);
+        }
+
+        // COPY — 复制
+        if (method === 'COPY') {
+          return await handleDavCopy(request, env, davPath);
+        }
+
+        // LOCK / UNLOCK — 锁存根
+        if (method === 'LOCK') {
+          return handleDavLock();
+        }
+        if (method === 'UNLOCK') {
+          return handleDavUnlock();
+        }
+
+        return new Response('Method Not Allowed', { status: 405 });
       }
+      // ============================================================
+
       if (method === 'OPTIONS') {
-        return new Response(null, { headers: DAV_CORS });
+        return new Response(null, { headers: corsHeaders });
       }
 
       if (path.startsWith('/api/')) {
+        
         if (path === '/api/login' && method === 'POST') {
           return await handleLogin(request, env);
-        } else if (path === '/api/logout' && method === 'POST') {
-          return await handleLogout();
-        } else if (path === '/api/auth/check') {
-          return await handleCheckAuth(request, env);
-        } else if (path === '/api/files' && method === 'POST') {
-          return await handleCreateFile(request, env);
-        } else if (path === '/api/folders' && method === 'POST') {
-          return await handleCreateFolder(request, env);
-        } else if (path.startsWith('/api/files')) {
-          const filePath = path.slice('/api/files'.length) || '/';
-          if (method === 'GET') return await handleListFiles(request, env, filePath);
-          if (method === 'POST') return await handleUploadFile(request, env, filePath);
-          if (method === 'PUT') return await handleRenameFile(request, env, filePath);
-          if (method === 'DELETE') return await handleDeleteFile(request, env, filePath);
-        } else if (path.startsWith('/api/download')) {
-          return await serveFile(request, env, path.slice('/api/download'.length), { download: true });
-        } else if (path.startsWith('/api/preview')) {
-          return await serveFile(request, env, path.slice('/api/preview'.length), { cache: true });
-        } else if (path.startsWith('/api/edit')) {
-          return await handleEditFile(request, env, path.slice('/api/edit'.length));
-        } else if (path === '/api/search' && method === 'GET') {
-          return await handleSearchFiles(request, env);
-        } else if (path === '/api/favorites') {
-          return await handleFavorites(request, env);
-        } else {
-          return jsonResponse({ success: false, message: 'API 路径不存在' }, 404);
         }
+
+        if (path === '/api/logout' && method === 'POST') {
+          return await handleLogout();
+        }
+
+        if (path === '/api/auth/check') {
+          return await handleCheckAuth(request, env);
+        }
+
+        if (path === '/api/files' && method === 'POST') {
+          return await handleCreateFile(request, env);
+        }
+
+        if (path === '/api/folders' && method === 'POST') {
+          return await handleCreateFolder(request, env);
+        }
+
+        if (path.startsWith('/api/files')) {
+          const filePath = path.slice('/api/files'.length) || '/';
+
+          if (method === 'GET') {
+            return await handleListFiles(request, env, filePath);
+          }
+          if (method === 'POST') {
+            return await handleUploadFile(request, env, filePath);
+          }
+          if (method === 'PUT') {
+            return await handleRenameFile(request, env, filePath);
+          }
+          if (method === 'DELETE') {
+            return await handleDeleteFile(request, env, filePath);
+          }
+        }
+
+        if (path.startsWith('/api/download')) {
+          return await serveFile(request, env, path.slice('/api/download'.length), { download: true });
+        }
+
+        if (path.startsWith('/api/preview')) {
+          return await serveFile(request, env, path.slice('/api/preview'.length), { cache: true });
+        }
+
+        if (path.startsWith('/api/edit')) {
+          return await handleEditFile(request, env, path.slice('/api/edit'.length));
+        }
+
+        if (path === '/api/search' && method === 'GET') {
+          return await handleSearchFiles(request, env);
+        }
+
+        if (path === '/api/favorites' && method === 'GET') {
+          return await handleGetFavorites(request, env);
+        }
+        if (path === '/api/favorites' && method === 'POST') {
+          return await handleAddFavorite(request, env);
+        }
+        if (path === '/api/favorites' && method === 'DELETE') {
+          return await handleRemoveFavorite(request, env);
+        }
+        if (path === '/api/favorites/order' && method === 'PUT') {
+          return await handleReorderFavorites(request, env);
+        }
+
+        return jsonResponse({ success: false, message: 'API 路径不存在' }, 404);
       }
 
       if (path === '/login.html' || path === '/login') {
@@ -3585,9 +3861,13 @@ export default {
         if (!auth) {
           return Response.redirect(url.origin + '/login.html', 302);
         }
-        const favRaw = await env.KV_STORE.get('favorites:admin');
+        // 预加载 favorites，嵌入 HTML 省掉前端一次 KV 读取
+        const favKey = getFavoritesKey();
+        const favRaw = await env.KV_STORE.get(favKey);
         const favorites = favRaw ? JSON.parse(favRaw) : [];
-        return htmlResponse(INDEX_PAGE.replace('</head>', `<script>window.__INIT__=${JSON.stringify({favorites})};</script></head>`));
+        const initData = { favorites: favorites || [] };
+        const initJson = JSON.stringify(initData);
+        return htmlResponse(INDEX_PAGE.replace('</head>', `<script>window.__INIT__=${initJson};</script></head>`));
       }
 
       return Response.redirect(url.origin + '/', 302);

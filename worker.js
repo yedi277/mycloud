@@ -292,8 +292,6 @@ async function requireAdmin(request, env) {
   }
   return auth;
 }
-
-// --- 通用辅助函数 ---
 function normalizePath(p) {
   if (!p) return '';
   if (p.startsWith('/')) p = p.slice(1);
@@ -317,7 +315,6 @@ function apiPathToFilePath(apiPath) {
 }
 
 async function checkPathAccess(auth, env, targetPath) {
-  // 通用路径权限检查：同时处理游客和注册用户
   const key = auth.role === 'guest' ? '__guest__' : (auth.email || null);
   if (!key) return null;
   const limits = await getUserLimits(env, key);
@@ -335,19 +332,12 @@ async function checkPathAccess(auth, env, targetPath) {
   }
   return null;
 }
-
-// --- 公共辅助函数 ---
-
-// 获取游客允许的文件夹列表（含默认值 ['guest']）
 async function getGuestAllowedFolders(env) {
   const limits = await getUserLimits(env, '__guest__');
   return (limits && limits.allowedFolders && limits.allowedFolders.length > 0)
     ? limits.allowedFolders.map(f => normalizeFolder(f))
     : ['guest'];
 }
-
-// 解析 WebDAV MOVE/COPY 的 Destination header，返回 { srcKey, dstKey }
-// 解析失败直接返回 Response 错误，成功返回 null 并把结果写入 out 对象
 async function parseDavDestination(request, davPath, auth, env, checkSrcAccess) {
   const destHeader = request.headers.get('Destination');
   if (!destHeader) return new Response('Missing Destination header', { status: 400 });
@@ -369,8 +359,6 @@ async function parseDavDestination(request, davPath, auth, env, checkSrcAccess) 
     return new Response('Invalid Destination header', { status: 400 });
   }
 }
-
-// 计算用户最大上传大小（字节），返回 0 表示不限制
 async function getMaxUploadSize(env, auth) {
   const globalSettings = await getGlobalSettings(env);
   let limits = null;
@@ -383,8 +371,6 @@ async function getMaxUploadSize(env, auth) {
   if (globalSettings.maxUploadSize > 0) return globalSettings.maxUploadSize * 1024 * 1024;
   return 0;
 }
-
-// 递归删除 R2 文件夹（前缀 key + '/' 的所有对象 + 文件夹本身）
 async function deleteR2Folder(env, key) {
   let cursor;
   do {
@@ -396,8 +382,6 @@ async function deleteR2Folder(env, key) {
   } while (cursor);
   await env.R2_BUCKET.delete(key);
 }
-
-// 递归复制 R2 文件夹（srcKey -> dstKey），不删除源
 async function copyR2Folder(env, srcKey, dstKey) {
   let cursor;
   do {
@@ -434,8 +418,6 @@ async function handleListFiles(request, env, path) {
         if (guestErr) return guestErr;
       }
     }
-
-    // 非游客受限用户：根目录列出允许的文件夹（而非跳转到第一个）
     if (auth.email && auth.role !== 'guest' && (prefix === '' || prefix === '/')) {
       const limits = await getUserLimits(env, auth.email);
       if (limits && limits.allowedFolders && limits.allowedFolders.length > 0) {
@@ -528,8 +510,6 @@ async function handleSearchFiles(request, env) {
     let cursor = undefined;
     let pages = 0;
     const maxPages = mode === 'full' ? 9999 : 10;
-
-    // 游客搜索范围：读取一次权限设置
     let guestAllowedFolders = null;
     if (auth.role === 'guest') {
       guestAllowedFolders = await getGuestAllowedFolders(env);
@@ -538,7 +518,6 @@ async function handleSearchFiles(request, env) {
     do {
       pages++;
       const options = cursor ? { cursor, limit: 1000 } : { limit: 1000 };
-      // 游客多文件夹：不设置 prefix，拉全部后在循环里过滤
       if (guestAllowedFolders && guestAllowedFolders.length === 1) {
         options.prefix = guestAllowedFolders[0] + '/';
       }
@@ -645,13 +624,9 @@ async function handleUploadFile(request, env, path) {
     const formData = await request.formData();
     const file = formData.get('file');
     if (!file) return jsonResponse({ success: false, message: '没有上传文件' }, 400);
-
-    // 从 API 路径中提取真实文件目录
     const filePathRaw = apiPathToFilePath(path);
     let filePath = normalizePath(filePathRaw);
     if (filePath && !filePath.endsWith('/')) filePath += '/';
-
-    // 游客上传路径保护：确保落在允许范围内
     if (auth.role === 'guest') {
       const allowedFolders = await getGuestAllowedFolders(env);
       const guestRoot = allowedFolders[0] + '/';
@@ -660,8 +635,6 @@ async function handleUploadFile(request, env, path) {
       const accessErr = await checkPathAccess(auth, env, filePath);
       if (accessErr) return accessErr;
     }
-
-    // 检查上传大小限制
     const maxSize = await getMaxUploadSize(env, auth);
     if (maxSize > 0 && file.size > maxSize) {
       return jsonResponse({ success: false, message: `文件大小超过限制 ${Math.round(maxSize / 1024 / 1024)}MB` }, 400);
@@ -934,7 +907,6 @@ async function handleGetStats(request, env) {
   }
 }
 
-// === 全局设置 ===
 const DEFAULT_SETTINGS = { guestLogin: true, maxUploadSize: 0, webdavEnabled: true, webdavReadOnly: false };
 
 async function getGlobalSettings(env) {
@@ -967,7 +939,6 @@ async function handleUpdateSettings(request, env) {
   }
 }
 
-// === 用户权限详情 ===
 const DEFAULT_USER_LIMITS = { role: 'user', maxUploadSize: 0, allowedFolders: [], webdavEnabled: true, webdavReadOnly: false };
 
 async function getUserLimits(env, email) {
@@ -1048,7 +1019,6 @@ async function handleListUsers(request, env) {
 
   try {
     const users = []; let cursor;
-    // 添加游客 "用户"，方便在列表查看和管理游客登录状态
     const settings = await getGlobalSettings(env);
     users.push({
       email: '__guest__',
@@ -1111,8 +1081,6 @@ async function handleCheckAuth(request, env) {
   if (!auth) return jsonResponse({ authenticated: false });
   return jsonResponse({ authenticated: true, role: auth.role, email: auth.email || null });
 }
-
-// === WebDAV ===
 
 function parseBasicAuth(request) {
   const authHeader = request.headers.get('Authorization') || '';
@@ -1527,7 +1495,6 @@ const CSS_STYLES = `
     --shadow-lg: 0 8px 30px rgba(0,0,0,0.6);
   }
 
-  /* Theme Toggle Button */
   .theme-toggle {
     background: none; border: 1px solid var(--border); border-radius: 50%;
     width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
@@ -1536,7 +1503,6 @@ const CSS_STYLES = `
   }
   .theme-toggle:hover { background: var(--surface-hover); }
 
-  /* Dark Mode Overrides */
   [data-theme="dark"] .header { background: rgba(28,28,30,0.72); }
   [data-theme="dark"] .btn-secondary { background: rgba(255,255,255,0.08); }
   [data-theme="dark"] .btn-secondary:hover { background: rgba(255,255,255,0.14); }
@@ -1589,8 +1555,6 @@ const CSS_STYLES = `
   .sidebar-divider { height: 1px; background: var(--border); margin: 8px 12px; }
   .main-content { flex: 1; min-width: 0; }
   .container { padding: 0; }
-
-  /* Buttons */
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
     padding: 8px 18px; border: none; border-radius: var(--radius-sm);
@@ -1618,8 +1582,6 @@ const CSS_STYLES = `
     background: #e0352b;
   }
   .btn-sm { padding: 5px 12px; font-size: 12px; }
-
-  /* Forms */
   .form-group { margin-bottom: 18px; }
   .form-label {
     display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500;
@@ -1637,8 +1599,6 @@ const CSS_STYLES = `
   }
   .form-select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2386868b' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 36px; }
   .form-help { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
-
-  /* Toggle Switch */
   .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
   .toggle-switch input { opacity: 0; width: 0; height: 0; }
   .toggle-slider {
@@ -1651,15 +1611,11 @@ const CSS_STYLES = `
   }
   .toggle-switch input:checked + .toggle-slider { background: var(--primary); }
   .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
-
-  /* Cards */
   .card {
     padding: 0; position: relative;
   }
   .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
   .card-title { font-size: 18px; font-weight: 600; }
-
-  /* Header */
   .header {
     background: rgba(255,255,255,0.72); backdrop-filter: var(--blur);
     -webkit-backdrop-filter: var(--blur);
@@ -1672,8 +1628,6 @@ const CSS_STYLES = `
     letter-spacing: -0.02em;
   }
   .header-actions { display: flex; gap: 8px; }
-
-  /* Search */
   .search-group { display: flex; align-items: stretch; flex: 1; max-width: 420px; margin: 0 16px; position: relative; }
   .search-box { position: relative; flex: 1; }
   .search-input {
@@ -1722,8 +1676,6 @@ const CSS_STYLES = `
   .search-result-size { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
   .search-empty { padding: 16px; text-align: center; color: var(--text-muted); font-size: 13px; }
   .search-result-name mark { background: rgba(0,122,255,0.15); color: var(--primary); font-weight: 600; border-radius: 2px; padding: 0 1px; }
-
-  /* Breadcrumb */
   .breadcrumb {
     display: flex; align-items: center; gap: 2px;
     padding: 4px 0; flex-wrap: wrap; font-size: 14px;
@@ -1732,8 +1684,6 @@ const CSS_STYLES = `
   .breadcrumb-item:hover { color: var(--primary); }
   .breadcrumb-item.active { color: var(--text); font-weight: 500; }
   .breadcrumb-separator { color: var(--border-strong); margin: 0 2px; }
-
-  /* Nav Buttons (Back/Forward) */
   .nav-btn {
     width: 26px; height: 26px; border: 1px solid var(--border);
     border-radius: var(--radius-sm); background: var(--surface);
@@ -1743,8 +1693,6 @@ const CSS_STYLES = `
   }
   .nav-btn:hover:not(:disabled) { background: rgba(0,122,255,0.1); color: var(--primary); border-color: var(--primary); }
   .nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-
-  /* File Grid */
   .file-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 8px; min-height: 200px; position: relative;
@@ -1788,8 +1736,6 @@ const CSS_STYLES = `
   .file-meta {
     font-size: 11px; color: var(--text-muted); text-align: center;
   }
-
-  /* View Toggle */
   .view-toggle {
     display: flex; background: rgba(0,0,0,0.04); border-radius: var(--radius-sm);
     overflow: hidden;
@@ -1801,8 +1747,6 @@ const CSS_STYLES = `
   }
   .view-toggle-btn:hover { color: var(--text); }
   .view-toggle-btn.active { background: var(--primary); color: #fff; }
-
-  /* List View */
   .file-list { display: block !important; min-height: auto; }
   .file-list .file-item {
     display: grid; grid-template-columns: 36px 1fr 100px 80px 70px; align-items: center;
@@ -1824,8 +1768,6 @@ const CSS_STYLES = `
   .sortable-header { transition: color var(--transition); }
   .sortable-header:hover { color: var(--primary); }
   .sortable-header.active { color: var(--primary); }
-
-  /* Toolbar */
   .toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
   .selection-info {
     margin-left: auto; padding: 6px 14px; background: var(--primary);
@@ -1833,8 +1775,6 @@ const CSS_STYLES = `
     display: none; animation: fadeIn 0.2s ease;
   }
   .selection-info.active { display: inline-block; }
-
-  /* Modal */
   .modal-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.3); backdrop-filter: blur(4px);
@@ -1859,8 +1799,6 @@ const CSS_STYLES = `
     align-items: center; justify-content: center; transition: all var(--transition);
   }
   .modal-close:hover { background: rgba(0,0,0,0.06); color: var(--text); }
-
-  /* Preview */
   .preview-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.92); display: flex; flex-direction: column;
@@ -1907,8 +1845,6 @@ const CSS_STYLES = `
   .preview-markdown th, .preview-markdown td { border: 1px solid var(--border); padding: 8px 12px; }
   .preview-loading { display: flex; flex-direction: column; align-items: center; gap: 16px; color: rgba(255,255,255,0.8); }
   .preview-error { text-align: center; color: var(--error); }
-
-  /* Toast */
   .toast-container { position: fixed; top: 20px; right: 20px; z-index: 3000; display: flex; flex-direction: column; gap: 8px; }
   .toast {
     padding: 14px 18px; border-radius: var(--radius-sm); color: #fff; font-size: 14px;
@@ -1924,8 +1860,6 @@ const CSS_STYLES = `
   @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes selectPulse { 0% { background: rgba(0,122,255,0.08); } 50% { background: rgba(0,122,255,0.25); } 100% { background: transparent; } }
-
-  /* Stats */
   .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 30px; }
   .stat-card {
     background: var(--surface); border-radius: var(--radius-lg); padding: 28px 24px;
@@ -1933,8 +1867,6 @@ const CSS_STYLES = `
   }
   .stat-value { font-size: 40px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; }
   .stat-label { color: var(--text-muted); font-size: 13px; margin-top: 6px; }
-
-  /* Tabs */
   .tabs {
     display: flex; gap: 4px; background: rgba(0,0,0,0.04); padding: 4px;
     border-radius: var(--radius); margin-bottom: 24px;
@@ -1949,8 +1881,6 @@ const CSS_STYLES = `
   .tab:hover:not(.active) { color: var(--text); }
   .tab-content { display: none; }
   .tab-content.active { display: block; animation: fadeIn 0.25s ease; }
-
-  /* Badge */
   .badge {
     display: inline-block; padding: 3px 8px; border-radius: 12px;
     font-size: 11px; font-weight: 600;
@@ -1960,15 +1890,11 @@ const CSS_STYLES = `
   .badge-error { background: rgba(255,59,48,0.12); color: var(--error); }
   .badge-info { background: rgba(0,122,255,0.12); color: var(--primary); }
   .badge-guest { background: rgba(175,82,222,0.12); color: #af52de; }
-
-  /* Table */
   .table-container { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
   th { font-weight: 600; color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
   tr:hover { background: var(--surface-hover); }
-
-  /* Login/Share container */
   .login-container {
     min-height: 100vh; display: flex; align-items: center; justify-content: center;
     background: linear-gradient(180deg, #f5f5f7 0%, #e8e8ed 100%); padding: 20px;
@@ -1989,12 +1915,8 @@ const CSS_STYLES = `
   .share-filename { font-size: 18px; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
   .share-filesize { color: var(--text-muted); margin-bottom: 24px; }
   .share-expired { color: var(--error); font-size: 16px; }
-
-  /* Empty State */
   .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
   .empty-icon { font-size: 56px; margin-bottom: 12px; opacity: 0.4; }
-
-  /* Loading */
   .spinner {
     width: 36px; height: 36px; border: 3px solid rgba(0,0,0,0.08);
     border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite;
@@ -2006,8 +1928,6 @@ const CSS_STYLES = `
     -webkit-backdrop-filter: blur(4px);
     display: flex; align-items: center; justify-content: center; z-index: 3000;
   }
-
-  /* Upload */
   .upload-overlay {
     position: absolute; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,122,255,0.06); border: 2px dashed var(--primary);
@@ -2039,8 +1959,6 @@ const CSS_STYLES = `
   .upload-progress-info { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--text-muted); }
   .upload-progress-filename { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .upload-progress-percentage { font-weight: 600; color: var(--primary); }
-
-  /* Context Menu */
   .context-menu {
     position: fixed; background: rgba(255,255,255,0.95);
     backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
@@ -2057,8 +1975,6 @@ const CSS_STYLES = `
   .context-menu-item:hover { background: rgba(0,122,255,0.06); color: var(--primary); }
   .context-menu-item.danger:hover { background: rgba(255,59,48,0.06); color: var(--error); }
   .context-menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
-
-  /* Ace Editor */
   .editor-tool-btn {
     background: none; border: none; color: #86868b; cursor: pointer;
     font-size: 13px; padding: 3px 7px; border-radius: 4px; line-height: 1;
@@ -2096,10 +2012,6 @@ const CSS_STYLES = `
     position: absolute; right: 0; bottom: 20px; width: 14px; height: 14px;
     cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #555 50%); z-index: 2;
   }
-
-  /* Responsive */
-
-  /* Mobile sidebar toggle – hidden on desktop */
   .sidebar-toggle { display: none; }
   .sidebar-backdrop { display: none; }
   .mobile-upload-bar { display: none; }
@@ -2108,7 +2020,6 @@ const CSS_STYLES = `
     html { font-size: 15px; }
     body { -webkit-tap-highlight-color: transparent; }
 
-    /* Header – stack + compact */
     .header { padding: 10px 14px; gap: 8px; flex-wrap: wrap; }
     .logo { font-size: 18px; white-space: nowrap; }
     .search-group { max-width: 100%; width: 100%; margin: 0; order: 3; }
@@ -2116,7 +2027,6 @@ const CSS_STYLES = `
     .header-actions .btn { padding: 6px 12px; font-size: 12px; }
     #adminBtn { display: none; }
 
-    /* Sidebar – hide by default, toggle via JS */
     .sidebar {
       position: fixed; top: 0; left: 0; bottom: 0; z-index: 500;
       width: 260px; background: var(--surface); box-shadow: var(--shadow-lg);
@@ -2134,8 +2044,6 @@ const CSS_STYLES = `
       background: rgba(0,0,0,0.3); backdrop-filter: blur(2px);
     }
     .sidebar-backdrop.active { display: block; }
-
-    /* Hamburger menu button */
     .sidebar-toggle {
       display: flex; width: 36px; height: 36px; border: 1px solid var(--border);
       border-radius: var(--radius-sm); background: var(--surface);
@@ -2148,19 +2056,14 @@ const CSS_STYLES = `
     .main-layout { flex-direction: column; padding: 0; gap: 0; }
     .main-content { width: 100%; }
 
-    /* Toolbar – hidden on mobile */
     .toolbar { display: none; }
 
-    /* Container */
     .container { padding: 0; }
 
-    /* File grid – 2 columns for mobile */
     .file-grid:not(.file-list) { grid-template-columns: repeat(2, 1fr); gap: 4px; min-height: 100px; }
     .file-item { padding: 5px 4px; gap: 1px; }
     .file-item .file-icon { font-size: 28px; }
     .file-item .file-name { font-size: 18px; line-height: 1.3; }
-
-    /* List view */
     .file-list .file-item { grid-template-columns: 40px 1fr 68px 50px; gap: 8px; padding: 8px 10px; align-items: center; }
     .file-list-header { grid-template-columns: 40px 1fr 68px 50px; gap: 8px; padding: 4px 10px; font-size: 12px; }
     .file-list .file-icon { font-size: 28px; flex-shrink: 0; }
@@ -2170,10 +2073,8 @@ const CSS_STYLES = `
     .file-list-header > *:nth-child(4) { text-align: right; }
     .file-list-header > *:nth-child(5) { display: none; }
 
-    /* Breadcrumb */
     .breadcrumb { font-size: 12px; padding: 4px 12px; }
 
-    /* Modals */
     .modal { padding: 20px; width: 94%; max-width: 100%; border-radius: var(--radius-lg); }
     .modal-title { font-size: 16px; }
     .modal-overlay { align-items: flex-end; }
@@ -2182,37 +2083,29 @@ const CSS_STYLES = `
       max-height: 90vh; margin-bottom: 0;
     }
 
-    /* Login / Share cards */
     .login-card, .share-card { padding: 28px 20px; max-width: 100%; margin: 0 8px; border-radius: var(--radius-lg); }
     .login-container { padding: 12px; align-items: flex-start; padding-top: 10vh; }
 
-    /* Preview overlay */
     .preview-header { padding: 10px 14px; gap: 8px; }
     .preview-filename { font-size: 14px; }
     .preview-overlay .btn { padding: 6px 12px; font-size: 12px; }
 
-    /* Admin page */
     .stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
     .stat-card { padding: 18px 12px; }
     .stat-value { font-size: 28px; }
     .stat-label { font-size: 12px; }
 
-    /* Admin tables */
     .table-container { margin: 0 -8px; }
     th, td { padding: 8px 10px; font-size: 12px; white-space: nowrap; }
 
-    /* Buttons – touch friendly */
     .btn { min-height: 40px; }
     .btn-sm { min-height: 32px; padding: 4px 10px; font-size: 11px; }
     .modal-close { width: 36px; height: 36px; font-size: 24px; }
 
-    /* Form inputs */
     .form-input, .form-select { padding: 10px 12px; font-size: 16px; }
 
-    /* Card – full width */
     .card { padding: 12px 8px; border-radius: 0; border: none; box-shadow: none; }
 
-    /* Footer upload bar (fixed bottom) */
     .mobile-upload-bar {
       display: flex; position: fixed; bottom: 0; left: 0; right: 0;
       padding: 10px 14px; padding-bottom: max(10px, env(safe-area-inset-bottom));
@@ -2848,7 +2741,6 @@ const INDEX_PAGE = `
 
       checkAuth().then(() => {
         updateNavButtons();
-        // 并行加载文件和收藏夹，互不依赖，减少等待时间
         Promise.all([loadFiles(), initFavorites()]).then(() => {
           initDragUpload();
           initContextMenu();
@@ -2860,7 +2752,6 @@ const INDEX_PAGE = `
 let favorites = [];
 
 async function initFavorites() {
-  // 优先使用服务端嵌入数据，省掉 /api/favorites KV 读取
   if (window.__INIT__ && window.__INIT__.favorites) {
     favorites = window.__INIT__.favorites;
     renderFavorites();
@@ -2951,14 +2842,12 @@ async function removeFavorite(index) {
   }
 }
 
-// --- 收藏夹拖拽排序 ---
 let _favDragIndex = -1;
 
 function onFavDragStart(event, index) {
   _favDragIndex = index;
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', index);
-  // 延迟添加 dragging 样式，避免截屏时包含它
   requestAnimationFrame(() => {
     event.target.classList.add('sidebar-item-dragging');
   });
@@ -2981,11 +2870,9 @@ async function onFavDrop(event, toIndex) {
   const fromIndex = _favDragIndex;
   if (fromIndex < 0 || fromIndex === toIndex) return;
 
-  // 本地重排
   const [moved] = favorites.splice(fromIndex, 1);
   favorites.splice(toIndex, 0, moved);
 
-  // 保存新顺序到服务端
   try {
     const response = await fetch('/api/favorites/order', {
       method: 'PUT',
@@ -3004,7 +2891,6 @@ async function onFavDrop(event, toIndex) {
   renderFavorites();
 }
 
-// 拖拽结束时清理
 document.addEventListener('dragend', () => {
   _favDragIndex = -1;
   document.querySelectorAll('.sidebar-item-dragging').forEach(el => el.classList.remove('sidebar-item-dragging'));
@@ -3266,7 +3152,6 @@ function handleItemClick(event, element) {
       selectSingle(element);
     }
   } else if (isMobile) {
-    // 移动端：点击直接打开
     const type = element.dataset.type;
     const path = element.dataset.path;
     if (type === 'folder') {
@@ -3399,7 +3284,6 @@ function initMultiSelect() {
 
     async function checkAuth() {
       try {
-        // 优先使用服务端嵌入的初始数据，省掉 /api/auth/check 请求
         if (window.__INIT__) {
           currentUserRole = window.__INIT__.role || 'user';
         } else {
@@ -3656,7 +3540,6 @@ sortedFiles.forEach(file => {
       updateNavButtons();
       loadFiles();
       highlightCurrentFavorite();
-      // close mobile sidebar on navigate
       var sidebar = document.getElementById('sidebar');
       if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
     }
@@ -3766,8 +3649,6 @@ sortedFiles.forEach(file => {
 
     async function uploadFiles(files) {
       if (!files || files.length === 0) return;
-
-      // 上传前检测文件大小（100MB）
       var oversizedNames = [];
       for (var i = 0; i < files.length; i++) {
         if (files[i].size > 100 * 1024 * 1024) {
@@ -3801,8 +3682,6 @@ sortedFiles.forEach(file => {
         if (files[i].size <= SMALL) smallFiles.push(files[i]);
         else largeFiles.push(files[i]);
       }
-
-      // 上传一个大文件（逐个，有实时进度）
       async function uploadLarge(file) {
         progressFilename.textContent = file.name + ' (' + (successCount + failCount + 1) + '/' + totalFiles + ')';
         return new Promise((resolve) => {
@@ -3832,8 +3711,6 @@ sortedFiles.forEach(file => {
           xhr.send(fd);
         });
       }
-
-      // 先并发上传小文件
       if (smallFiles.length > 0) {
         progressFilename.textContent = '上传小文件...（' + smallFiles.length + ' 个）';
         await Promise.all(smallFiles.map(file => {
@@ -3856,8 +3733,6 @@ sortedFiles.forEach(file => {
           });
         }));
       }
-
-      // 再逐个上传大文件
       for (let i = 0; i < largeFiles.length; i++) {
         await uploadLarge(largeFiles[i]);
       }
@@ -4732,8 +4607,6 @@ const ADMIN_PAGE = `
 
         if (data.success) {
           const tbody = document.getElementById('usersTable');
-
-          // 游客始终显示在列表顶部，其余为注册用户
           const guestUser = data.users.find(u => u.email === '__guest__');
           const normalUsers = data.users.filter(u => u.email !== '__guest__');
 
@@ -4813,8 +4686,6 @@ const ADMIN_PAGE = `
         showToast('复制失败', 'error');
       });
     }
-
-    // === 系统设置 ===
     let _userPermsEmail = '';
 
     async function loadSettings() {
@@ -4872,13 +4743,10 @@ const ADMIN_PAGE = `
       }
       setTimeout(() => { msgEl.textContent = ''; }, 3000);
     }
-
-    // === 用户权限设置 ===
     async function showUserPermsModal(email) {
       _userPermsEmail = email;
       const isGuest = email === '__guest__';
       document.getElementById('permsUserEmail').textContent = isGuest ? '游客' : email;
-      // 游客不能修改角色，隐藏角色下拉
       const roleGroup = document.getElementById('permsRole').parentElement;
       roleGroup.style.display = isGuest ? 'none' : '';
       document.getElementById('permsRole').value = 'user';
@@ -5107,13 +4975,11 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // 屏蔽无用请求，避免浪费 Worker 调用配额
     if (path === '/favicon.ico' || path === '/robots.txt' || path === '/.well-known' || path.startsWith('/.well-known/')) {
       return new Response(null, { status: 404 });
     }
 
     try {
-      // WebDAV 路由
       if (path.startsWith('/dav')) {
         return await handleWebDAV(request, env);
       }
@@ -5269,7 +5135,6 @@ export default {
         if (!auth) {
           return Response.redirect(url.origin + '/login.html', 302);
         }
-        // 预加载 favorites，嵌入 HTML 省掉前端一次 KV 读取
         const favKey = getFavoritesKey(auth);
         const favRaw = await env.KV_STORE.get(favKey);
         const favorites = favRaw ? JSON.parse(favRaw) : [];
