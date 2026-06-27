@@ -11,6 +11,12 @@
 - 安全分享 — 密码保护、有效期控制、访问统计
 - 兼容 WebDAV 的服务
 ---
+## 多版本 
+
+- 多用户版:	worker.js
+- 单用户版:		worker_Single.js
+- WEBdav纯后台版:	worker_webdav.js
+- WEBdav网页UI版:worker_webdavUI.js
 
 ## 多版本 
 
