@@ -19,11 +19,11 @@
 - WEBdav纯后台版:worker_webdav.js
 - WEBdav网页UI版:worker_webdavUI.js
 
-## 管理员登录 
+## 管理员登录提示 
 
 (ADMIN_PASSWORD:填写的就是管理员登录密码)
-!!!管理员登录 输入密码后, 点击游客登录.
-管理员登录WEBdav:账户随意填写 填写管理员密码.
+- !!!管理员登录 输入密码后, 点击游客登录.
+管理员链接 WEBdav :账户随意填写 填写管理员密码.
 
 ## Cloudflare部署指南
 

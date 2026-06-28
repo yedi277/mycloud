@@ -13,10 +13,12 @@
  * ADMIN_PASSWORD = "你的管理员密码"
  */
 
-// ============================================================
-// 工具函数
-// ============================================================
-
+// ========== 工具函数 ==========
+/**
+ * 根据文件扩展名获取对应的 MIME 类型
+ * @param {string} filename - 文件名
+ * @returns {string} MIME 类型
+ */
 function getMimeType(filename) {
   const ext = filename.split('.').pop().toLowerCase();
   const mimeTypes = {
@@ -42,12 +44,22 @@ function getMimeType(filename) {
   return mimeTypes[ext] || 'application/octet-stream';
 }
 
+/**
+ * 标准化路径：去掉开头斜杠，去掉末尾斜杠
+ * @param {string} p - 原始路径
+ * @returns {string} 标准化后的路径
+ */
 function normalizePath(p) {
   if (!p) return '';
   if (p.startsWith('/')) p = p.slice(1);
   return p.replace(/\/+$/, '');
 }
 
+/**
+ * 格式化文件大小（字节转换为可读字符串）
+ * @param {number} bytes - 字节数
+ * @returns {string} 格式化后的文件大小（如 "1.5 MB"）
+ */
 function formatFileSize(bytes) {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -55,6 +67,11 @@ function formatFileSize(bytes) {
   return parseFloat((bytes / Math.pow(1024, i)).toFixed(1)) + ' ' + units[i];
 }
 
+/**
+ * 格式化时间（相对时间：刚刚、X分钟前、X小时前，或具体日期）
+ * @param {string|Date} dateStr - 日期字符串或日期对象
+ * @returns {string} 格式化后的时间字符串
+ */
 function formatTime(dateStr) {
   const d = new Date(dateStr);
   const now = new Date();
@@ -65,10 +82,11 @@ function formatTime(dateStr) {
   return d.toLocaleDateString('zh-CN') + ' ' + d.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
 }
 
-// ============================================================
-// R2 辅助函数
-// ============================================================
-
+/**
+ * 递归删除 R2 中的文件夹（包括所有子文件和子文件夹）
+ * @param {object} env - Worker 环境变量
+ * @param {string} key - 要删除的文件夹路径（R2 key前缀）
+ */
 async function deleteR2Folder(env, key) {
   let cursor;
   do {
@@ -81,6 +99,12 @@ async function deleteR2Folder(env, key) {
   await env.R2_BUCKET.delete(key).catch(() => {});
 }
 
+/**
+ * 递归复制 R2 中的文件夹到新位置
+ * @param {object} env - Worker 环境变量
+ * @param {string} srcKey - 源文件夹路径
+ * @param {string} dstKey - 目标文件夹路径
+ */
 async function copyR2Folder(env, srcKey, dstKey) {
   let cursor;
   do {
@@ -102,6 +126,12 @@ async function copyR2Folder(env, srcKey, dstKey) {
   } while (cursor);
 }
 
+/**
+ * 解析 WebDAV Destination 请求头，获取移动/复制操作的目标路径
+ * @param {Request} request - HTTP 请求对象
+ * @param {string} davPath - 当前 WebDAV 路径
+ * @returns {object|Response} 包含 srcKey 和 dstKey 的对象，或错误 Response
+ */
 async function parseDavDestination(request, davPath) {
   const destHeader = request.headers.get('Destination');
   if (!destHeader) return new Response('Missing Destination header', { status: 400 });
@@ -116,18 +146,30 @@ async function parseDavDestination(request, davPath) {
   }
 }
 
-// ============================================================
-// XML 辅助（WebDAV）
-// ============================================================
-
+/**
+ * XML 特殊字符转义（防XML注入）
+ * @param {string} s - 原始字符串
+ * @returns {string} 转义后的字符串
+ */
 function xmlEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/**
+ * 将日期转换为 RFC 1123 格式（HTTP 标准日期格式）
+ * @param {Date|string} d - 日期对象或日期字符串
+ * @returns {string} RFC 1123 格式日期字符串
+ */
 function rfc1123Date(d) {
   return new Date(d).toUTCString();
 }
 
+/**
+ * 构建 WebDAV XML 响应
+ * @param {string} body - XML 响应体内容
+ * @param {number} status - HTTP 状态码，默认 207 (MultiStatus)
+ * @returns {Response} WebDAV XML 响应对象
+ */
 function davXmlResponse(body, status = 207) {
   const xml = '<?xml version="1.0" encoding="utf-8"?>\n' + body;
   return new Response(xml, {
@@ -136,22 +178,25 @@ function davXmlResponse(body, status = 207) {
   });
 }
 
-// ============================================================
-// 认证
-// ============================================================
-
+// ========== 认证相关函数 ==========
+/**
+ * 验证请求认证：支持 HTTP Basic Auth、Cookie Token、Bearer Token
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量（含 ADMIN_PASSWORD）
+ * @returns {object|null} 认证成功返回用户信息，失败返回 null
+ */
 async function verifyAuth(request, env) {
-  // HTTP Basic Auth
   const authHeader = request.headers.get('Authorization');
   if (authHeader && authHeader.startsWith('Basic ')) {
     try {
+      // 解码 Base64 编码的 Basic Auth 凭证（格式：username:password，这里只校验 password）
       const decoded = atob(authHeader.slice(6));
       const colon = decoded.indexOf(':');
       const pass = decoded.slice(colon + 1);
       if (pass === env.ADMIN_PASSWORD) return { role: 'admin' };
     } catch {}
   }
-  // Cookie / Bearer JWT（网页登录用）
+    // 方式2：检查 Cookie 中的 Token
   const cookie = request.headers.get('Cookie') || '';
   const match = cookie.match(/token=([^;]+)/);
   if (match) {
@@ -162,6 +207,7 @@ async function verifyAuth(request, env) {
       }
     } catch {}
   }
+    // 方式3：检查 Authorization Bearer Token
   const token = request.headers.get('Authorization')?.replace('Bearer ', '');
   if (token) {
     try {
@@ -174,21 +220,30 @@ async function verifyAuth(request, env) {
   return null;
 }
 
+/**
+ * 生成简易 JWT Token（含密码和过期时间）
+ * @param {string} pass - 用户密码
+ * @returns {string} JWT Token 字符串（header.payload.signature）
+ */
 function makeToken(pass) {
+    // 构建简易 JWT（header.payload.signature，这里 signature 是伪签名）
   const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const now = Math.floor(Date.now() / 1000);
   const payload = btoa(JSON.stringify({ role: 'admin', pass, exp: now + 86400 * 7 }));
   return `${header}.${payload}.signed`;
 }
 
+/**
+ * 生成 Token 的 Set-Cookie 响应头字符串
+ * @param {string} token - JWT Token
+ * @returns {string} Set-Cookie 头字符串
+ */
 function makeTokenCookie(token) {
   return `token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${86400 * 7}`;
 }
 
-// ============================================================
-// 网页 UI
-// ============================================================
-
+// ========== 前端 CSS 样式 ==========
+// 网页 UI 的 CSS 样式表（内联在 HTML 中）
 const CSS_STYLES = `<style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; color: #333; min-height: 100vh; }
@@ -247,6 +302,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .toast-warning { background: #faad14; color: #333; }
 </style>`;
 
+// ========== 登录页面 HTML 模板 ==========
 const LOGIN_PAGE = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>登录 - 网盘</title>${CSS_STYLES}</head>
@@ -272,6 +328,12 @@ document.getElementById('password').addEventListener('keypress', e => { if(e.key
 </body>
 </html>`;
 
+// ========== 文件管理页面 HTML 模板 ==========
+/**
+ * 生成文件管理页面的完整 HTML（含内联 CSS 和 JS）
+ * @param {string} currentPath - 当前浏览的文件夹路径
+ * @returns {string} 完整的 HTML 页面字符串
+ */
 function getIndexPage(currentPath) {
   const pathDisplay = currentPath || '/';
   const parentPath = currentPath ? currentPath.split('/').slice(0, -1).join('/') : '';
@@ -412,7 +474,6 @@ async function doRename() {
   if(data.success) { hideRename(); loadFiles(); }
 }
 
-// 上传
 const SMALL = 1*1024*1024;
 document.getElementById('fileInput').addEventListener('change', async e => {
   const files = e.target.files;
@@ -489,10 +550,13 @@ loadFiles();
 </html>`;
 }
 
-// ============================================================
-// API 处理（网页UI用）
-// ============================================================
-
+// ========== REST API 接口处理函数 ==========
+/**
+ * 处理登录 API（/api/login）：验证密码，返回 Token
+ * @param {Request} request - HTTP 请求（含 password 字段的 JSON body）
+ * @param {object} env - Worker 环境变量
+ * @returns {Response} 成功返回 Token，失败返回 401
+ */
 async function handleApiLogin(request, env) {
   try {
     const { password } = await request.json();
@@ -510,6 +574,12 @@ async function handleApiLogin(request, env) {
   }
 }
 
+/**
+ * 处理文件列表 API（/api/list）：列出指定路径下的文件和文件夹
+ * @param {Request} request - HTTP 请求（含 path 查询参数）
+ * @param {object} env - Worker 环境变量
+ * @returns {Response} JSON 格式的文件列表
+ */
 async function handleApiList(request, env) {
   const auth = await verifyAuth(request, env);
   if (!auth) return jsonResponse({ success: false, message: 'Unauthorized' }, 401);
@@ -561,6 +631,12 @@ async function handleApiList(request, env) {
   }
 }
 
+/**
+ * 处理文件上传 API（/api/upload）：接收表单文件，存入 R2
+ * @param {Request} request - HTTP 请求（FormData，含 file 字段）
+ * @param {object} env - Worker 环境变量
+ * @returns {Response} 上传结果 JSON
+ */
 async function handleApiUpload(request, env) {
   const auth = await verifyAuth(request, env);
   if (!auth) return jsonResponse({ success: false, message: 'Unauthorized' }, 401);
@@ -582,6 +658,12 @@ async function handleApiUpload(request, env) {
   }
 }
 
+/**
+ * 处理文件/文件夹删除 API（/api/delete）
+ * @param {Request} request - HTTP 请求（含 path 查询参数）
+ * @param {object} env - Worker 环境变量
+ * @returns {Response} 删除结果 JSON
+ */
 async function handleApiDelete(request, env) {
   const auth = await verifyAuth(request, env);
   if (!auth) return jsonResponse({ success: false, message: 'Unauthorized' }, 401);
@@ -603,6 +685,12 @@ async function handleApiDelete(request, env) {
   }
 }
 
+/**
+ * 处理新建文件夹 API（/api/mkdir）
+ * @param {Request} request - HTTP 请求（含 path 字段的 JSON body）
+ * @param {object} env - Worker 环境变量
+ * @returns {Response} 创建结果 JSON
+ */
 async function handleApiMkdir(request, env) {
   const auth = await verifyAuth(request, env);
   if (!auth) return jsonResponse({ success: false, message: 'Unauthorized' }, 401);
@@ -617,6 +705,12 @@ async function handleApiMkdir(request, env) {
   }
 }
 
+/**
+ * 处理重命名/移动 API（/api/rename）
+ * @param {Request} request - HTTP 请求（含 oldPath、newPath 字段的 JSON body）
+ * @param {object} env - Worker 环境变量
+ * @returns {Response} 重命名结果 JSON
+ */
 async function handleApiRename(request, env) {
   const auth = await verifyAuth(request, env);
   if (!auth) return jsonResponse({ success: false, message: 'Unauthorized' }, 401);
@@ -646,6 +740,12 @@ async function handleApiRename(request, env) {
   }
 }
 
+/**
+ * 构建 JSON 格式的 HTTP 响应
+ * @param {object} data - 要序列化为 JSON 的数据对象
+ * @param {number} status - HTTP 状态码，默认 200
+ * @returns {Response} JSON 响应对象
+ */
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -653,10 +753,11 @@ function jsonResponse(data, status = 200) {
   });
 }
 
-// ============================================================
-// WebDAV 方法处理
-// ============================================================
-
+// ========== WebDAV 处理方法 ==========
+/**
+ * 处理 WebDAV OPTIONS 请求（返回支持的 HTTP 方法）
+ * @returns {Response} OPTIONS 响应，包含 Allow 和 DAV 头
+ */
 function handleDavOptions() {
   return new Response(null, {
     status: 200,
@@ -669,15 +770,25 @@ function handleDavOptions() {
   });
 }
 
+/**
+ * 处理 WebDAV PROPFIND 请求（列出文件/文件夹属性）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径
+ * @returns {Response} 包含文件属性的 XML 响应（207 MultiStatus）
+ */
 async function handleDavPropfind(request, env, davPath) {
   const auth = await verifyAuth(request, env);
   if (!auth) return requireDavAuth(request, 'xml');
 
   try {
+    // 获取 WebDAV Depth 头（infinity|0|1）：决定列出多少层目录
     const depth = request.headers.get('Depth') || 'infinity';
+    // 构建 WebDAV 基础 URL（用于生成响应中的 href 路径）
     const baseUrl = new URL(request.url).origin + '/dav/';
 
     const fileObj = davPath ? await env.R2_BUCKET.get(davPath) : null;
+      // 情况1：davPath 是一个具体文件 → 返回单文件属性
     if (fileObj) {
       const name = davPath.split('/').pop();
       const mtime = fileObj.uploaded || new Date();
@@ -701,6 +812,7 @@ async function handleDavPropfind(request, env, davPath) {
       return new Response(xml, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
     }
 
+      // 情况2：davPath 是文件夹 → 列出文件夹内容
     const prefix = davPath ? davPath + '/' : '';
     const objects = [];
     const folders = new Set();
@@ -793,6 +905,13 @@ async function handleDavPropfind(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV GET 请求（下载文件）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（文件路径）
+ * @returns {Response} 文件内容响应，或文件夹的 PROPFIND 响应
+ */
 async function handleDavGet(request, env, davPath) {
   const auth = await verifyAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -823,6 +942,13 @@ async function handleDavGet(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV HEAD 请求（获取文件头信息，不返回内容）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径
+ * @returns {Response} 只有响应头的 Response
+ */
 async function handleDavHead(request, env, davPath) {
   const auth = await verifyAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -853,6 +979,13 @@ async function handleDavHead(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV PUT 请求（上传/创建文件）
+ * @param {Request} request - HTTP 请求对象（包含文件内容）
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（目标文件路径）
+ * @returns {Response} 201 创建成功
+ */
 async function handleDavPut(request, env, davPath) {
   const auth = await verifyAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -867,6 +1000,13 @@ async function handleDavPut(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV DELETE 请求（删除文件或文件夹）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（要删除的文件/文件夹路径）
+ * @returns {Response} 204 删除成功
+ */
 async function handleDavDelete(request, env, davPath) {
   const auth = await verifyAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -879,6 +1019,13 @@ async function handleDavDelete(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV MKCOL 请求（创建文件夹）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（新文件夹路径）
+ * @returns {Response} 201 创建成功
+ */
 async function handleDavMkcol(request, env, davPath) {
   const auth = await verifyAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -896,6 +1043,13 @@ async function handleDavMkcol(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV MOVE 请求（移动/重命名文件或文件夹）
+ * @param {Request} request - HTTP 请求对象（含 Destination 头）
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（源路径）
+ * @returns {Response} 201 移动成功
+ */
 async function handleDavMove(request, env, davPath) {
   const auth = await verifyAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -903,6 +1057,7 @@ async function handleDavMove(request, env, davPath) {
   try {
     const parsed = await parseDavDestination(request, davPath);
     if (parsed instanceof Response) return parsed;
+    // 解析结果：srcKey=源路径，dstKey=目标路径
     const { srcKey, dstKey } = parsed;
 
     const srcObj = await env.R2_BUCKET.get(srcKey);
@@ -924,6 +1079,13 @@ async function handleDavMove(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV COPY 请求（复制文件或文件夹）
+ * @param {Request} request - HTTP 请求对象（含 Destination 头）
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（源路径）
+ * @returns {Response} 201 复制成功
+ */
 async function handleDavCopy(request, env, davPath) {
   const auth = await verifyAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -931,6 +1093,7 @@ async function handleDavCopy(request, env, davPath) {
   try {
     const parsed = await parseDavDestination(request, davPath);
     if (parsed instanceof Response) return parsed;
+    // 解析结果：srcKey=源路径，dstKey=目标路径
     const { srcKey, dstKey } = parsed;
 
     const srcObj = await env.R2_BUCKET.get(srcKey);
@@ -951,6 +1114,10 @@ async function handleDavCopy(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV LOCK 请求（加锁，简化版：总是返回成功）
+ * @returns {Response} 锁定成功的 XML 响应
+ */
 function handleDavLock() {
   const xml = `<?xml version="1.0" encoding="utf-8"?>
 <d:prop xmlns:d="DAV:">
@@ -972,10 +1139,20 @@ function handleDavLock() {
   });
 }
 
+/**
+ * 处理 WebDAV UNLOCK 请求（解锁，简化版：总是返回成功）
+ * @returns {Response} 204 解锁成功
+ */
 function handleDavUnlock() {
   return new Response(null, { status: 204 });
 }
 
+/**
+ * 返回 WebDAV 认证失败响应（401 Unauthorized）
+ * @param {Request} request - HTTP 请求对象
+ * @param {string} resType - 响应类型：'text' 或 'xml'
+ * @returns {Response} 401 未授权响应
+ */
 function requireDavAuth(request, resType = 'text') {
   const headers = {
     'WWW-Authenticate': 'Basic realm="WebDAV", charset="UTF-8"',
@@ -989,17 +1166,27 @@ function requireDavAuth(request, resType = 'text') {
   return new Response('Unauthorized', { status: 401, headers });
 }
 
-// ============================================================
-// 主路由
-// ============================================================
-
+// ========== Worker 主入口 ==========
+/**
+ * Cloudflare Worker 主入口：处理所有传入的 HTTP 请求
+ * 路由逻辑：
+ *   1. OPTIONS 请求 → CORS 预检响应
+ *   2. GET /login → 登录页面
+ *   3. POST /api/login → 登录 API
+ *   4. GET / → 文件管理页面（需认证）
+ *   5. /api/* → REST API 接口（需认证）
+ *   6. /dav/* → WebDAV 处理
+ *   7. 其他 → 404 Not Found
+ */
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    // 解析请求 URL、路径和 HTTP 方法
     const path = decodeURIComponent(url.pathname);
     const method = request.method;
+    // 解析请求 URL、路径和 HTTP 方法
 
-    // CORS preflight
+    // --- 处理 CORS 预检请求（OPTIONS）---
     if (method === 'OPTIONS') {
       if (path.startsWith('/dav')) {
         return new Response(null, {
@@ -1014,18 +1201,20 @@ export default {
     }
 
     try {
-      // 网页UI路由
+    // --- 登录页面（无需认证）---
       if (path === '/login' && method === 'GET') {
         return new Response(LOGIN_PAGE, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
 
+    // --- API 登录接口（无需认证）---
       if (path === '/api/login' && method === 'POST') {
         return await handleApiLogin(request, env);
       }
-
-      // 需要认证的网页路由
+    // --- 以下路由需要认证 ---
+    // 验证用户登录状态（Cookie Token 或 HTTP Basic Auth）
       const auth = await verifyAuth(request, env);
 
+    // --- 文件管理页面（需认证）---
       if (path === '/' || path === '/index.html') {
         if (!auth) return Response.redirect(url.origin + '/login', 302);
         const params = new URLSearchParams(url.search);
@@ -1033,14 +1222,13 @@ export default {
         return new Response(getIndexPage(currentPath), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       }
 
-      // API路由
+    // --- REST API 接口（需认证）---
       if (path === '/api/list') return await handleApiList(request, env);
       if (path === '/api/upload') return await handleApiUpload(request, env);
       if (path === '/api/delete') return await handleApiDelete(request, env);
       if (path === '/api/mkdir') return await handleApiMkdir(request, env);
       if (path === '/api/rename') return await handleApiRename(request, env);
-
-      // 文件下载
+    // --- 文件下载接口（需认证）---
       if (path === '/api/download') {
         if (!auth) return new Response('Unauthorized', { status: 401 });
         const filePath = normalizePath(url.searchParams.get('path') || '');
@@ -1056,13 +1244,13 @@ export default {
           }
         });
       }
-
-      // WebDAV路由
+    // --- WebDAV 端点（需认证）---
       if (path.startsWith('/dav/') || path === '/dav') {
         let davPath = path === '/dav' ? '' : path.slice(5);
         if (davPath.startsWith('/')) davPath = davPath.slice(1);
         davPath = davPath.replace(/\/$/, '');
 
+        // 根据 HTTP 方法分发到对应的 WebDAV 处理函数
         const methodMap = {
           'OPTIONS': () => handleDavOptions(),
           'PROPFIND': () => handleDavPropfind(request, env, davPath),

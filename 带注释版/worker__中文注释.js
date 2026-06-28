@@ -12,6 +12,12 @@ bucket_name = "你的R2桶名"
 [vars]
 ADMIN_PASSWORD = "你的管理员密码"
 */
+
+
+/**
+ * 生成随机ID（字母+数字）
+ * @param {number} length - ID长度，默认16
+ */
 function generateId(length = 16) {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
@@ -23,6 +29,12 @@ function generateId(length = 16) {
   return result;
 }
 
+
+/**
+ * SHA-256哈希密码
+ * @param {string} password - 明文密码
+ * @returns {Promise<string>} 十六进制哈希字符串
+ */
 async function hashPassword(password) {
   const encoder = new TextEncoder();
   const data = encoder.encode(password);
@@ -31,19 +43,52 @@ async function hashPassword(password) {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+
+/**
+ * 生成登录Cookie的Set-Cookie头值
+
+ * @param {string} token - JWT token
+ * @param {number} maxAge - 有效期（秒），默认86400（1天）
+ */
 function makeTokenCookie(token, maxAge = 86400) {
   return { 'Set-Cookie': `token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}` };
 }
 
+
+
+// ============================================================
+// ========== KV 统计计数辅助函数 ==========
+// ============================================================
+
+/**
+ * 增减KV中的统计数据（如访问次数）
+ * @param {object} env - Worker环境
+ * @param {string} key - KV中的键名
+ * @param {number} delta - 增减量，默认+1
+ */
 async function incrementStat(env, key, delta = 1) {
-  const val = parseInt(await env.KV_STORE.get(key) || '0') + delta;
-  await env.KV_STORE.put(key, String(Math.max(0, val)));
+  const val = parseInt(await env.KV_STORE.get(key) || '0') + delta;  // 从 KV 读取（键值存储，用于收藏夹/设置/分享）
+  await env.KV_STORE.put(key, String(Math.max(0, val)));  // 写入 KV（持久化存储）
 }
 
+
+
+/**
+ * Base64 URL安全编码（JWT标准）
+ * 去掉=，+换-，/换_
+ * @param {string} str - 待编码字符串
+ */
 function base64UrlEncode(str) {
   return btoa(str).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 }
 
+
+/**
+ * 创建JWT token（HMAC SHA-256签名）
+ * @param {object} payload - 载荷（如{email, role, exp}）
+ * @param {string} secret - 签名密钥
+ */
+// 生成 JWT（HMAC SHA-256 签名）
 async function createJWT(payload, secret) {
   const header = { alg: 'HS256', typ: 'JWT' };
   const encodedHeader = base64UrlEncode(JSON.stringify(header));
@@ -69,6 +114,14 @@ async function createJWT(payload, secret) {
   return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
 }
 
+
+/**
+ * 验证JWT token
+ * @param {string} token - JWT字符串
+ * @param {string} secret - 签名密钥
+ * @returns {Promise<object|null>} payload或null（无效/过期）
+ */
+// 验证 JWT 签名和有效期
 async function verifyJWT(token, secret) {
   try {
     const parts = token.split('.');
@@ -106,6 +159,11 @@ async function verifyJWT(token, secret) {
   }
 }
 
+
+/**
+ * 计算JWT过期时间（时间戳ms）
+ * @param {string} expiresIn - "1h"|"1d"|"1m"|"permanent"
+ */
 function getExpirationTime(expiresIn) {
   const now = Date.now();
   switch (expiresIn) {
@@ -117,6 +175,12 @@ function getExpirationTime(expiresIn) {
   }
 }
 
+
+
+/**
+ * 字节数转人类可读字符串（如 1.5 MB）
+ * @param {number} bytes - 字节数
+ */
 function formatFileSize(bytes) {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -125,6 +189,11 @@ function formatFileSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+
+/**
+ * ISO时间字符串转本地格式
+ * 同年显示 MM-DD HH:MM，否则 YY-MM-DD HH:MM
+ */
 function formatTime(isoStr) {
   if (!isoStr) return '-';
   const d = new Date(isoStr);
@@ -136,6 +205,11 @@ function formatTime(isoStr) {
   return String(d.getFullYear()).slice(2) + '-' + mmdd + ' ' + hhmm;
 }
 
+
+/**
+ * 根据文件扩展名返回MIME类型
+ * @param {string} filename - 文件名
+ */
 function getMimeType(filename) {
   const ext = filename.split('.').pop().toLowerCase();
   const mimeTypes = {
@@ -167,6 +241,11 @@ function getMimeType(filename) {
   return mimeTypes[ext] || 'application/octet-stream';
 }
 
+
+/**
+ * 根据扩展名判断文件预览类型
+ * @returns {"image"|"pdf"|"text"|"word"|"video"|"audio"|null}
+ */
 function getPreviewType(filename) {
   const ext = filename.split('.').pop().toLowerCase();
 
@@ -197,6 +276,11 @@ function getPreviewType(filename) {
   return null;
 }
 
+
+/**
+ * 解析Cookie请求头为{name: value}对象
+ */
+// 解析 Cookie 请求头
 function parseCookies(request) {
   const cookieHeader = request.headers.get('Cookie') || '';
   const cookies = {};
@@ -209,6 +293,12 @@ function parseCookies(request) {
   return cookies;
 }
 
+
+/**
+ * 快速构造JSON响应
+ * @param {object} data - JSON数据
+ * @param {number} status - HTTP状态码，默认200
+ */
 function jsonResponse(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -219,6 +309,12 @@ function jsonResponse(data, status = 200, headers = {}) {
   });
 }
 
+
+/**
+ * 快速构造HTML响应
+ * @param {string} html - HTML字符串
+ * @param {number} status - HTTP状态码，默认200
+ */
 function htmlResponse(html, status = 200, headers = {}) {
   return new Response(html, {
     status,
@@ -229,6 +325,17 @@ function htmlResponse(html, status = 200, headers = {}) {
   });
 }
 
+
+
+// ============================================================
+// ========== 登录 / 登出 / JWT 鉴权 ==========
+// ============================================================
+
+/**
+ * 处理登录请求
+ * 验证邮箱+密码 → 生成JWT → 设置Cookie
+ */
+
 async function handleLogin(request, env) {
   try {
     const { email, password, isAdmin, isGuest } = await request.json();
@@ -236,30 +343,38 @@ async function handleLogin(request, env) {
     if (isGuest) {
       if (!(await getGlobalSettings(env)).guestLogin) return jsonResponse({ success: false, message: '管理员已关闭游客登录' }, 403);
       return jsonResponse({ success: true, role: 'guest' }, 200,
+        // 生成 JWT（HMAC SHA-256 签名）
         makeTokenCookie(await createJWT({ role: 'guest', exp: Date.now() + 86400000 }, env.ADMIN_PASSWORD)));
     }
 
     if (isAdmin) {
       if (password !== env.ADMIN_PASSWORD) return jsonResponse({ success: false, message: '密码错误' }, 401);
       return jsonResponse({ success: true, role: 'admin' }, 200,
+        // 生成 JWT（HMAC SHA-256 签名）
         makeTokenCookie(await createJWT({ role: 'admin', exp: Date.now() + 86400000 }, env.ADMIN_PASSWORD)));
     }
 
     if (!email || !password) return jsonResponse({ success: false, message: '请输入邮箱和密码' }, 400);
 
-    const userData = await env.KV_STORE.get(`user:${email}`);
+    const userData = await env.KV_STORE.get(`user:${email}`);  // 从 KV 读取（键值存储，用于收藏夹/设置/分享）
     if (!userData) return jsonResponse({ success: false, message: '用户不存在' }, 401);
 
     const user = JSON.parse(userData);
     if (user.passwordHash !== await hashPassword(password)) return jsonResponse({ success: false, message: '密码错误' }, 401);
 
     return jsonResponse({ success: true, role: 'user', email: user.email }, 200,
+      // 生成 JWT（HMAC SHA-256 签名）
       makeTokenCookie(await createJWT({ email: user.email, role: 'user', exp: Date.now() + 86400000 }, env.ADMIN_PASSWORD)));
   } catch (e) {
     return jsonResponse({ success: false, message: '登录失败: ' + e.message }, 500);
   }
 }
 
+
+/**
+ * 处理登出请求
+ * 清除token Cookie
+ */
 async function handleLogout() {
   return jsonResponse(
     { success: true },
@@ -268,15 +383,33 @@ async function handleLogout() {
   );
 }
 
+
+
+// ============================================================
+// ========== 鉴权中间件（requireAuth / requireAdmin） ==========
+// ============================================================
+
+/**
+ * 验证请求是否已登录（解析Cookie中的JWT）
+ * @returns {object|null} payload或null
+ */
 async function verifyAuth(request, env) {
+  // 解析 Cookie 请求头
   const cookies = parseCookies(request);
   const token = cookies.token;
 
   if (!token) return null;
 
+  // 验证 JWT 签名和有效期
   return await verifyJWT(token, env.ADMIN_PASSWORD);
 }
 
+
+/**
+ * 登录验证中间件：未登录返回401
+ * @returns {object|Response} payload或401 Response
+ */
+// 鉴权：未登录返回 401
 async function requireAuth(request, env) {
   const auth = await verifyAuth(request, env);
   if (!auth) {
@@ -285,6 +418,11 @@ async function requireAuth(request, env) {
   return auth;
 }
 
+
+/**
+ * 管理员权限验证：非admin返回403
+ */
+// 管理员检查：非 admin 返回 403
 async function requireAdmin(request, env) {
   const auth = await verifyAuth(request, env);
   if (!auth || auth.role !== 'admin') {
@@ -293,18 +431,30 @@ async function requireAdmin(request, env) {
   return auth;
 }
 
-// --- 通用辅助函数 ---
+/**
+ * 规范化路径：去掉开头/，防止//
+ * @param {string} p - 原始路径
+ */
+
 function normalizePath(p) {
   if (!p) return '';
   if (p.startsWith('/')) p = p.slice(1);
   return p;
 }
 
+
+/**
+ * 规范化文件夹路径（已弃用，保留兼容）
+ */
 function normalizeFolder(f) {
   if (!f) return '';
   return f.replace(/^\/+|\/+$/g, '');
 }
 
+
+/**
+ * 将API路径（/api/files/xxx）转为R2 key路径
+ */
 function apiPathToFilePath(apiPath) {
   const prefixes = ['/api/files', '/api/preview', '/api/download', '/api/edit'];
   for (const p of prefixes) {
@@ -316,8 +466,11 @@ function apiPathToFilePath(apiPath) {
   return apiPath;
 }
 
+
+/**
+ * 检查用户是否有权访问指定路径（guest/admin权限控制）
+ */
 async function checkPathAccess(auth, env, targetPath) {
-  // 通用路径权限检查：同时处理游客和注册用户
   const key = auth.role === 'guest' ? '__guest__' : (auth.email || null);
   if (!key) return null;
   const limits = await getUserLimits(env, key);
@@ -336,9 +489,9 @@ async function checkPathAccess(auth, env, targetPath) {
   return null;
 }
 
-// --- 公共辅助函数 ---
-
-// 获取游客允许的文件夹列表（含默认值 ['guest']）
+/**
+ * 获取guest用户可访问的文件夹列表（从KV读取）
+ */
 async function getGuestAllowedFolders(env) {
   const limits = await getUserLimits(env, '__guest__');
   return (limits && limits.allowedFolders && limits.allowedFolders.length > 0)
@@ -346,8 +499,15 @@ async function getGuestAllowedFolders(env) {
     : ['guest'];
 }
 
-// 解析 WebDAV MOVE/COPY 的 Destination header，返回 { srcKey, dstKey }
-// 解析失败直接返回 Response 错误，成功返回 null 并把结果写入 out 对象
+
+// ============================================================
+// ========== WebDAV 路径解析辅助函数 ==========
+// ============================================================
+
+/**
+ * 解析WebDAV Destination头，提取目标路径
+ * @returns {{srcKey: string, dstKey: string}}
+ */
 async function parseDavDestination(request, davPath, auth, env, checkSrcAccess) {
   const destHeader = request.headers.get('Destination');
   if (!destHeader) return new Response('Missing Destination header', { status: 400 });
@@ -370,7 +530,14 @@ async function parseDavDestination(request, davPath, auth, env, checkSrcAccess) 
   }
 }
 
-// 计算用户最大上传大小（字节），返回 0 表示不限制
+
+// ============================================================
+// ========== 上传限制读取辅助函数 ==========
+// ============================================================
+
+/**
+ * 获取最大上传大小限制（MB），从设置读取
+ */
 async function getMaxUploadSize(env, auth) {
   const globalSettings = await getGlobalSettings(env);
   let limits = null;
@@ -384,29 +551,45 @@ async function getMaxUploadSize(env, auth) {
   return 0;
 }
 
-// 递归删除 R2 文件夹（前缀 key + '/' 的所有对象 + 文件夹本身）
+
+// ============================================================
+// ========== R2 文件夹操作辅助函数 ==========
+// ============================================================
+
+/**
+ * 递归删除R2"文件夹"（删除所有带该prefix的对象+.keep标记）
+ */
+
 async function deleteR2Folder(env, key) {
   let cursor;
   do {
+    // 列出 R2 对象（prefix + delimiter 模拟文件夹）
     const batch = await env.R2_BUCKET.list({ prefix: key + '/', cursor });
     if (batch.objects && batch.objects.length > 0) {
+      // 删除 R2 对象（文件或 .keep 标记）
       await env.R2_BUCKET.delete(batch.objects.map(obj => obj.key));
     }
     cursor = batch.truncated ? batch.cursor : null;
   } while (cursor);
+  // 删除 R2 对象（文件或 .keep 标记）
   await env.R2_BUCKET.delete(key);
 }
 
-// 递归复制 R2 文件夹（srcKey -> dstKey），不删除源
+/**
+ * 递归复制R2"文件夹"（复制所有带srcKey prefix的对象到dstKey）
+ */
 async function copyR2Folder(env, srcKey, dstKey) {
   let cursor;
   do {
+    // 列出 R2 对象（prefix + delimiter 模拟文件夹）
     const batch = await env.R2_BUCKET.list({ prefix: srcKey + '/', cursor });
     if (batch.objects) {
       for (const obj of batch.objects) {
         const newKey = dstKey + '/' + obj.key.slice(srcKey.length + 1);
+        // 读取 R2 对象（支持 Range 分片下载）
         const srcFile = await env.R2_BUCKET.get(obj.key);
         if (srcFile) {
+          // 写入 R2 对象（可附带 Content-Type 元数据）
           await env.R2_BUCKET.put(newKey, srcFile.body, { httpMetadata: srcFile.httpMetadata });
         }
       }
@@ -415,7 +598,18 @@ async function copyR2Folder(env, srcKey, dstKey) {
   } while (cursor);
 }
 
+
+
+// ============================================================
+// ========== 【API】文件列表 & 搜索 ==========
+// ============================================================
+
+/**
+ * API: 列出目录下的文件和文件夹
+ */
+
 async function handleListFiles(request, env, path) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
@@ -434,11 +628,10 @@ async function handleListFiles(request, env, path) {
         if (guestErr) return guestErr;
       }
     }
-
-    // 非游客受限用户：根目录列出允许的文件夹（而非跳转到第一个）
     if (auth.email && auth.role !== 'guest' && (prefix === '' || prefix === '/')) {
       const limits = await getUserLimits(env, auth.email);
       if (limits && limits.allowedFolders && limits.allowedFolders.length > 0) {
+        // 列出 R2 对象（prefix + delimiter 模拟文件夹）
         const allListed = await env.R2_BUCKET.list({ delimiter: '/' });
         const allowedSet = new Set(limits.allowedFolders.map(f => normalizeFolder(f)));
 
@@ -446,7 +639,7 @@ async function handleListFiles(request, env, path) {
         const folders = [];
 
         if (allListed.delimitedPrefixes) {
-          for (const folderPath of allListed.delimitedPrefixes) {
+          for (const folderPath of allListed.delimitedPrefixes) {  // WebDAV CORS 响应头（允许跨域，Windows 客户端需要）
             const name = folderPath.slice(0, -1);
             if (allowedSet.has(name)) {
               folders.push({ name, path: '/' + name });
@@ -476,6 +669,7 @@ async function handleListFiles(request, env, path) {
     const accessErr = await checkPathAccess(auth, env, prefix.replace(/\/+$/, ''));
     if (accessErr) return accessErr;
 
+    // 列出 R2 对象（prefix + delimiter 模拟文件夹）
     const listed = await env.R2_BUCKET.list({ prefix, delimiter: '/' });
 
     const files = [];
@@ -514,7 +708,12 @@ async function handleListFiles(request, env, path) {
   }
 }
 
+
+/**
+ * API: 搜索文件（支持文件名模糊匹配，最多50条）
+ */
 async function handleSearchFiles(request, env) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
@@ -528,8 +727,6 @@ async function handleSearchFiles(request, env) {
     let cursor = undefined;
     let pages = 0;
     const maxPages = mode === 'full' ? 9999 : 10;
-
-    // 游客搜索范围：读取一次权限设置
     let guestAllowedFolders = null;
     if (auth.role === 'guest') {
       guestAllowedFolders = await getGuestAllowedFolders(env);
@@ -538,11 +735,11 @@ async function handleSearchFiles(request, env) {
     do {
       pages++;
       const options = cursor ? { cursor, limit: 1000 } : { limit: 1000 };
-      // 游客多文件夹：不设置 prefix，拉全部后在循环里过滤
       if (guestAllowedFolders && guestAllowedFolders.length === 1) {
         options.prefix = guestAllowedFolders[0] + '/';
       }
 
+      // 列出 R2 对象（prefix + delimiter 模拟文件夹）
       const listed = await env.R2_BUCKET.list(options);
       if (!listed.objects) break;
 
@@ -580,14 +777,24 @@ async function handleSearchFiles(request, env) {
   }
 }
 
+
+/**
+ * API: 获取收藏夹列表（从KV读取）
+ */
 async function handleGetFavorites(request, env) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
-  const data = await env.KV_STORE.get(getFavoritesKey(auth));
+  const data = await env.KV_STORE.get(getFavoritesKey(auth));  // 从 KV 读取（键值存储，用于收藏夹/设置/分享）
   return jsonResponse({ success: true, favorites: data ? JSON.parse(data) : [] }, 200, { 'Cache-Control': 'private, max-age=5' });
 }
 
+
+/**
+ * API: 添加收藏（name + path）
+ */
 async function handleAddFavorite(request, env) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
@@ -595,28 +802,38 @@ async function handleAddFavorite(request, env) {
   if (!name || !path) return jsonResponse({ success: false, message: '缺少参数' }, 400);
 
   const key = getFavoritesKey(auth);
-  const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
+  const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');  // 从 KV 读取（键值存储，用于收藏夹/设置/分享）
   if (favorites.some(f => f.path === path)) return jsonResponse({ success: false, message: '已在收藏夹中' });
   favorites.push({ name, path });
-  await env.KV_STORE.put(key, JSON.stringify(favorites));
+  await env.KV_STORE.put(key, JSON.stringify(favorites));  // 写入 KV（持久化存储）
   return jsonResponse({ success: true, favorites });
 }
 
+
+/**
+ * API: 删除收藏（按index）
+ */
 async function handleRemoveFavorite(request, env) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
   const index = parseInt(new URL(request.url).searchParams.get('index'));
   const key = getFavoritesKey(auth);
-  const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');
+  const favorites = JSON.parse((await env.KV_STORE.get(key)) || '[]');  // 从 KV 读取（键值存储，用于收藏夹/设置/分享）
   if (isNaN(index) || index < 0 || index >= favorites.length) return jsonResponse({ success: false, message: '无效索引' }, 400);
 
   favorites.splice(index, 1);
-  await env.KV_STORE.put(key, JSON.stringify(favorites));
+  await env.KV_STORE.put(key, JSON.stringify(favorites));  // 写入 KV（持久化存储）
   return jsonResponse({ success: true, favorites });
 }
 
+
+/**
+ * API: 重新排序收藏夹（拖拽后保存新顺序）
+ */
 async function handleReorderFavorites(request, env) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
@@ -624,20 +841,35 @@ async function handleReorderFavorites(request, env) {
     const { favorites } = await request.json();
     if (!Array.isArray(favorites)) return jsonResponse({ success: false, message: '无效数据' }, 400);
     const key = getFavoritesKey(auth);
-    await env.KV_STORE.put(key, JSON.stringify(favorites));
+    await env.KV_STORE.put(key, JSON.stringify(favorites));  // 写入 KV（持久化存储）
     return jsonResponse({ success: true, favorites });
   } catch (e) {
     return jsonResponse({ success: false, message: '保存顺序失败: ' + e.message }, 500);
   }
 }
 
+
+/**
+ * 获取当前用户的收藏夹KV键名（favorites:email）
+ */
 function getFavoritesKey(auth) {
   if (auth.role === 'guest') return 'favorites:guest';
   if (auth.role === 'admin') return 'favorites:admin';
   return 'favorites:user:' + (auth.email || 'unknown');
 }
 
+
+
+// ============================================================
+// ========== 【API】文件上传 ==========
+// ============================================================
+
+/**
+ * API: 上传文件（multipart/form-data）
+ */
+
 async function handleUploadFile(request, env, path) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
@@ -645,13 +877,9 @@ async function handleUploadFile(request, env, path) {
     const formData = await request.formData();
     const file = formData.get('file');
     if (!file) return jsonResponse({ success: false, message: '没有上传文件' }, 400);
-
-    // 从 API 路径中提取真实文件目录
     const filePathRaw = apiPathToFilePath(path);
     let filePath = normalizePath(filePathRaw);
     if (filePath && !filePath.endsWith('/')) filePath += '/';
-
-    // 游客上传路径保护：确保落在允许范围内
     if (auth.role === 'guest') {
       const allowedFolders = await getGuestAllowedFolders(env);
       const guestRoot = allowedFolders[0] + '/';
@@ -660,14 +888,13 @@ async function handleUploadFile(request, env, path) {
       const accessErr = await checkPathAccess(auth, env, filePath);
       if (accessErr) return accessErr;
     }
-
-    // 检查上传大小限制
     const maxSize = await getMaxUploadSize(env, auth);
     if (maxSize > 0 && file.size > maxSize) {
       return jsonResponse({ success: false, message: `文件大小超过限制 ${Math.round(maxSize / 1024 / 1024)}MB` }, 400);
     }
 
     const key = filePath + file.name;
+    // 写入 R2 对象（可附带 Content-Type 元数据）
     await env.R2_BUCKET.put(key, file.stream(), {
       httpMetadata: { contentType: file.type || getMimeType(file.name) }
     });
@@ -677,7 +904,18 @@ async function handleUploadFile(request, env, path) {
   }
 }
 
+
+
+// ============================================================
+// ========== 【API】文件删除 ==========
+// ============================================================
+
+/**
+ * API: 删除文件或文件夹
+ */
+
 async function handleDeleteFile(request, env, path) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
@@ -698,7 +936,18 @@ async function handleDeleteFile(request, env, path) {
   }
 }
 
+
+
+// ============================================================
+// ========== 【API】文件/文件夹重命名 ==========
+// ============================================================
+
+/**
+ * API: 重命名文件/文件夹（PUT /api/files/xxx）
+ */
+
 async function handleRenameFile(request, env, path) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
@@ -718,15 +967,18 @@ async function handleRenameFile(request, env, path) {
     const parentPath = oldKey.includes('/') ? oldKey.substring(0, oldKey.lastIndexOf('/') + 1) : '';
     const newKey = parentPath + newName;
 
+    // 读取 R2 对象（支持 Range 分片下载）
     const oldObject = await env.R2_BUCKET.get(oldKey);
     if (!oldObject) {
       return jsonResponse({ success: false, message: '文件不存在' }, 404);
     }
 
+    // 写入 R2 对象（可附带 Content-Type 元数据）
     await env.R2_BUCKET.put(newKey, oldObject.body, {
       httpMetadata: oldObject.httpMetadata
     });
 
+    // 删除 R2 对象（文件或 .keep 标记）
     await env.R2_BUCKET.delete(oldKey);
 
     return jsonResponse({ success: true, message: '重命名成功', newPath: '/' + newKey });
@@ -735,7 +987,18 @@ async function handleRenameFile(request, env, path) {
   }
 }
 
+
+
+// ============================================================
+// ========== 【API】新建文件夹 & 新建文件 ==========
+// ============================================================
+
+/**
+ * API: 新建文件夹（写.keep标记文件）
+ */
+
 async function handleCreateFolder(request, env) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
@@ -752,6 +1015,7 @@ async function handleCreateFolder(request, env) {
     const accessErr = await checkPathAccess(auth, env, folderPath.replace(/\/+$/, ''));
     if (accessErr) return accessErr;
 
+    // 写入 R2 对象（可附带 Content-Type 元数据）
     await env.R2_BUCKET.put(folderPath + '.folder', new Uint8Array(0));
 
     return jsonResponse({ success: true, message: '文件夹创建成功', path: '/' + folderPath.slice(0, -1) });
@@ -760,7 +1024,13 @@ async function handleCreateFolder(request, env) {
   }
 }
 
+
+/**
+ * API: 新建空白文件
+ */
+
 async function handleCreateFile(request, env) {
+  // 鉴权：未登录返回 401
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
@@ -774,9 +1044,11 @@ async function handleCreateFile(request, env) {
     const guestErr = await checkPathAccess(auth, env, filePath);
     if (guestErr) return guestErr;
 
+    // 读取 R2 对象（支持 Range 分片下载）
     const existing = await env.R2_BUCKET.get(filePath);
     if (existing) return jsonResponse({ success: false, message: '文件已存在' }, 409);
 
+    // 写入 R2 对象（可附带 Content-Type 元数据）
     await env.R2_BUCKET.put(filePath, new TextEncoder().encode(content || ''));
 
     return jsonResponse({ success: true, message: '文件创建成功', path: '/' + filePath });
@@ -785,12 +1057,23 @@ async function handleCreateFile(request, env) {
   }
 }
 
+
+
+// ============================================================
+// ========== 【API】文件预览 & 下载（支持 Range） ==========
+// ============================================================
+
+/**
+ // 处理 HTTP Range（分片下载/断点续传）
+ * 提供文件下载/预览（支持Range分片、缓存控制）
+ */
 async function serveFile(request, env, path, { download = false, cache = false } = {}) {
   const auth = await verifyAuth(request, env);
   if (!auth) return jsonResponse({ success: false, message: '未授权' }, 401);
 
   try {
     let key = normalizePath(apiPathToFilePath(path));
+    // 读取 R2 对象（支持 Range 分片下载）
     const object = await env.R2_BUCKET.get(key);
     if (!object) return jsonResponse({ success: false, message: '文件不存在' }, 404);
 
@@ -807,6 +1090,15 @@ async function serveFile(request, env, path, { download = false, cache = false }
   }
 }
 
+
+
+// ============================================================
+// ========== 【API】文本文件在线编辑 ==========
+// ============================================================
+
+/**
+ * API: 读取/保存文本文件内容（GET/PUT）
+ */
 async function handleEditFile(request, env, path) {
   const auth = await verifyAuth(request, env);
   if (!auth) return jsonResponse({ success: false, message: '未授权' }, 401);
@@ -838,6 +1130,16 @@ async function handleEditFile(request, env, path) {
   return jsonResponse({ success: false, message: '不支持的请求方法' }, 405);
 }
 
+
+
+// ============================================================
+// ========== 【API】分享链接管理 ==========
+// ============================================================
+
+/**
+ * API: 创建分享链接（生成shareId，存入KV）
+ */
+
 async function handleCreateShare(request, env) {
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
@@ -862,9 +1164,13 @@ async function handleCreateShare(request, env) {
     return jsonResponse({ success: true, shareId, shareUrl: `/s/${shareId}` });
   } catch (e) {
     return jsonResponse({ success: false, message: '创建分享链接失败: ' + e.message }, 500);
-  }
+  }  // 系统默认设置（游客登录、上传限制、WebDAV 开关等）
 }
 
+
+/**
+ * API: 获取分享信息（供分享页面使用）
+ */
 async function handleGetShareInfo(request, env, shareId) {
   try {
     const raw = await env.KV_STORE.get(`share:${shareId}`);
@@ -886,6 +1192,10 @@ async function handleGetShareInfo(request, env, shareId) {
   }
 }
 
+  // 系统默认设置（游客登录、上传限制、WebDAV 开关等）
+/**
+ * API: 分享文件下载（无需登录，验证shareId）
+ */
 async function handleShareDownload(request, env, shareId) {
   try {
     const raw = await env.KV_STORE.get(`share:${shareId}`);
@@ -898,7 +1208,7 @@ async function handleShareDownload(request, env, shareId) {
 
     if (share.passwordHash) {
       const { password } = await request.json();
-      if (!password) return jsonResponse({ success: false, message: '请输入密码' }, 401);
+      if (!password) return jsonResponse({ success: false, message: '请输入密码' }, 401);  // 用户默认限制（新注册用户的初始权限）
       if (await hashPassword(password) !== share.passwordHash) return jsonResponse({ success: false, message: '密码错误' }, 401);
     }
 
@@ -921,6 +1231,16 @@ async function handleShareDownload(request, env, shareId) {
   }
 }
 
+
+
+// ============================================================
+// ========== 【API】统计信息 & 全局设置 ==========
+// ============================================================
+
+/**
+ * API: 获取统计信息（文件数、存储用量等，admin专用）
+ */
+
 async function handleGetStats(request, env) {
   const auth = await requireAdmin(request, env);
   if (auth instanceof Response) return auth;
@@ -934,15 +1254,22 @@ async function handleGetStats(request, env) {
   }
 }
 
-// === 全局设置 ===
-const DEFAULT_SETTINGS = { guestLogin: true, maxUploadSize: 0, webdavEnabled: true, webdavReadOnly: false };
+const DEFAULT_SETTINGS = { guestLogin: true, maxUploadSize: 0, webdavEnabled: true, webdavReadOnly: false };  // 系统默认设置（游客登录、上传限制、WebDAV 开关等）
 
+
+/**
+ * 从KV读取全局设置
+ */
 async function getGlobalSettings(env) {
   const raw = await env.KV_STORE.get('settings:global');
   if (!raw) return { ...DEFAULT_SETTINGS };
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }; } catch { return { ...DEFAULT_SETTINGS }; }
 }
 
+
+/**
+ * API: 获取设置（admin获取全局，user获取个人）
+ */
 async function handleGetSettings(request, env) {
   const auth = await requireAdmin(request, env);
   if (auth instanceof Response) return auth;
@@ -950,6 +1277,10 @@ async function handleGetSettings(request, env) {
   catch (e) { return jsonResponse({ success: false, message: '获取设置失败: ' + e.message }, 500); }
 }
 
+
+/**
+ * API: 更新设置
+ */
 async function handleUpdateSettings(request, env) {
   const auth = await requireAdmin(request, env);
   if (auth instanceof Response) return auth;
@@ -967,9 +1298,13 @@ async function handleUpdateSettings(request, env) {
   }
 }
 
-// === 用户权限详情 ===
-const DEFAULT_USER_LIMITS = { role: 'user', maxUploadSize: 0, allowedFolders: [], webdavEnabled: true, webdavReadOnly: false };
 
+const DEFAULT_USER_LIMITS = { role: 'user', maxUploadSize: 0, allowedFolders: [], webdavEnabled: true, webdavReadOnly: false };  // 用户默认限制（新用户的初始权限设置）
+
+
+/**
+ * 获取用户上传限制（从KV读取）
+ */
 async function getUserLimits(env, email) {
   try {
     const raw = await env.KV_STORE.get(`settings:user:${email}`);
@@ -977,6 +1312,10 @@ async function getUserLimits(env, email) {
   } catch { return null; }
 }
 
+
+/**
+ * API: 获取指定用户的设置（admin专用）
+ */
 async function handleGetUserSettings(request, env, email) {
   const auth = await requireAdmin(request, env);
   if (auth instanceof Response) return auth;
@@ -984,6 +1323,10 @@ async function handleGetUserSettings(request, env, email) {
   catch (e) { return jsonResponse({ success: false, message: '获取用户设置失败: ' + e.message }, 500); }
 }
 
+
+/**
+ * API: 更新指定用户的设置（admin专用）
+ */
 async function handleUpdateUserSettings(request, env, email) {
   const auth = await requireAdmin(request, env);
   if (auth instanceof Response) return auth;
@@ -1005,6 +1348,11 @@ async function handleUpdateUserSettings(request, env, email) {
     return jsonResponse({ success: false, message: '更新用户设置失败: ' + e.message }, 500);
   }
 }
+
+
+/**
+ * API: 列出所有分享（admin专用）
+ */
 
 async function handleListShares(request, env) {
   const auth = await requireAdmin(request, env);
@@ -1030,6 +1378,11 @@ async function handleListShares(request, env) {
   }
 }
 
+
+/**
+ * API: 删除分享（admin或创建者）
+ */
+
 async function handleDeleteShare(request, env, shareId) {
   const auth = await requireAdmin(request, env);
   if (auth instanceof Response) return auth;
@@ -1042,13 +1395,21 @@ async function handleDeleteShare(request, env, shareId) {
   }
 }
 
+
+
+// ============================================================
+// ========== 【API】用户管理（admin 专用） ==========
+// ============================================================
+
+/**
+ * API: 列出所有用户（admin专用）
+ */
 async function handleListUsers(request, env) {
   const auth = await requireAdmin(request, env);
   if (auth instanceof Response) return auth;
 
   try {
     const users = []; let cursor;
-    // 添加游客 "用户"，方便在列表查看和管理游客登录状态
     const settings = await getGlobalSettings(env);
     users.push({
       email: '__guest__',
@@ -1074,6 +1435,10 @@ async function handleListUsers(request, env) {
   }
 }
 
+
+/**
+ * API: 创建新用户（admin专用）
+ */
 async function handleCreateUser(request, env) {
   const auth = await requireAdmin(request, env);
   if (auth instanceof Response) return auth;
@@ -1094,6 +1459,10 @@ async function handleCreateUser(request, env) {
   }
 }
 
+
+/**
+ * API: 删除用户（admin专用）
+ */
 async function handleDeleteUser(request, env, email) {
   const auth = await requireAdmin(request, env);
   if (auth instanceof Response) return auth;
@@ -1106,13 +1475,26 @@ async function handleDeleteUser(request, env, email) {
   }
 }
 
+
+
+// ============================================================
+// ========== 【API】鉴权状态查询 ==========
+// ============================================================
+
+/**
+ * API: 检查登录状态（前端轮询用）
+ */
+
 async function handleCheckAuth(request, env) {
   const auth = await verifyAuth(request, env);
   if (!auth) return jsonResponse({ authenticated: false });
   return jsonResponse({ authenticated: true, role: auth.role, email: auth.email || null });
 }
 
-// === WebDAV ===
+
+/**
+ * 解析HTTP Basic Auth头（返回{bemail, password}）
+ */
 
 function parseBasicAuth(request) {
   const authHeader = request.headers.get('Authorization') || '';
@@ -1127,6 +1509,16 @@ function parseBasicAuth(request) {
   } catch { return null; }
 }
 
+
+
+// ============================================================
+// ========== WebDAV 鉴权（Basic + Cookie 兼容） ==========
+// ============================================================
+
+/**
+
+ * WebDAV身份验证（支持Basic Auth和Cookie/JWT两种）
+ */
 async function webdavAuth(request, env) {
   const cookies = parseCookies(request);
   const token = cookies.token;
@@ -1161,6 +1553,16 @@ async function webdavAuth(request, env) {
   return { role: 'user', email: user.email };
 }
 
+
+
+// ============================================================
+// ========== WebDAV 只读模式检查 ==========
+// ============================================================
+
+/**
+ * 检查WebDAV是否为只读模式（从设置读取）
+ */
+
 async function isDavReadOnly(settings, auth, env) {
   if (settings.webdavReadOnly) return true;
   if (auth.role === 'guest') {
@@ -1173,10 +1575,18 @@ async function isDavReadOnly(settings, auth, env) {
   return false;
 }
 
+
+/**
+ * XML特殊字符转义（&, <, >, ", '）
+ */
 function davXmlEsc(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+
+/**
+ * 格式化日期为RFC 1123格式（WebDAV需要，如"Mon, 01 Jan 2024 12:00:00 GMT"）
+ */
 function fmtRfc1123(d) {
   const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1185,12 +1595,25 @@ function fmtRfc1123(d) {
   return `${days[date.getUTCDay()]}, ${pad(date.getUTCDate())} ${months[date.getUTCMonth()]} ${date.getUTCFullYear()} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} GMT`;
 }
 
+
+/**
+ * 构建WebDAV PROPFIND响应中的<propstat>片段（XML字符串）
+ */
 function buildPropstat(href, props, statusCode) {
   const statusMap = { 200: 'HTTP/1.1 200 OK', 404: 'HTTP/1.1 404 Not Found', 403: 'HTTP/1.1 403 Forbidden' };
   const s = statusMap[statusCode] || 'HTTP/1.1 200 OK';
   return `<D:response><D:href>${davXmlEsc(href)}</D:href><D:propstat><D:status>${s}</D:status><D:prop>${props}</D:prop></D:propstat></D:response>`;
 }
 
+
+
+// ============================================================
+// ========== 【WebDAV】PROPFIND / GET / HEAD ==========
+// ============================================================
+
+/**
+ * WebDAV: PROPFIND - 查询文件/文件夹属性（返回XML）
+ */
 async function handleDavPropfind(request, env, davPath, depth, auth) {
   const responses = [];
   let prefix = normalizePath(davPath);
@@ -1225,6 +1648,7 @@ async function handleDavPropfind(request, env, davPath, depth, auth) {
             const childHref = currentHrefSlash + name + '/';
             const childProps = [
               '<D:resourcetype><D:collection/></D:resourcetype>',
+
               `<D:getlastmodified>${fmtRfc1123(new Date())}</D:getlastmodified>`
             ].join('');
             responses.push(buildPropstat(childHref, childProps, 200));
@@ -1255,6 +1679,10 @@ async function handleDavPropfind(request, env, davPath, depth, auth) {
   return new Response(body, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8', 'DAV': '1,2' } });
 }
 
+
+/**
+ * WebDAV: GET - 下载文件（支持Range分片下载）
+ */
 async function handleDavGet(request, env, davPath, auth) {
   const key = normalizePath(davPath);
   const object = await env.R2_BUCKET.get(key);
@@ -1271,6 +1699,15 @@ async function handleDavGet(request, env, davPath, auth) {
   });
 }
 
+
+
+// ============================================================
+// ========== 【WebDAV】PUT / DELETE / MKCOL ==========
+// ============================================================
+
+/**
+ * WebDAV: PUT - 上传/覆盖文件
+ */
 async function handleDavPut(request, env, davPath, auth) {
   const settings = await getGlobalSettings(env);
   if (await isDavReadOnly(settings, auth, env)) {
@@ -1287,6 +1724,7 @@ async function handleDavPut(request, env, davPath, auth) {
       const guestRoot = allowedFolders[0] + '/';
       const key = davPath.startsWith('/') ? normalizePath(davPath) : guestRoot + normalizePath(davPath);
       if (!key.startsWith(guestRoot)) {
+
         return new Response('Access denied', { status: 403 });
       }
       const contentType = request.headers.get('Content-Type') || getMimeType(key.split('/').pop());
@@ -1306,6 +1744,10 @@ async function handleDavPut(request, env, davPath, auth) {
   }
 }
 
+
+/**
+ * WebDAV: DELETE - 删除文件/文件夹
+ */
 async function handleDavDelete(request, env, davPath, auth) {
   const settings = await getGlobalSettings(env);
   if (await isDavReadOnly(settings, auth, env)) {
@@ -1324,6 +1766,10 @@ async function handleDavDelete(request, env, davPath, auth) {
   }
 }
 
+
+/**
+ * WebDAV: MKCOL - 创建文件夹（写.keep标记）
+ */
 async function handleDavMkcol(request, env, davPath, auth) {
   const settings = await getGlobalSettings(env);
   if (await isDavReadOnly(settings, auth, env)) {
@@ -1348,6 +1794,15 @@ async function handleDavMkcol(request, env, davPath, auth) {
   }
 }
 
+
+
+// ============================================================
+// ========== 【WebDAV】MOVE / COPY ==========
+// ============================================================
+
+/**
+ * WebDAV: MOVE - 移动/重命名文件或文件夹
+ */
 async function handleDavMove(request, env, davPath, auth) {
   const settings = await getGlobalSettings(env);
   if (await isDavReadOnly(settings, auth, env)) {
@@ -1355,6 +1810,7 @@ async function handleDavMove(request, env, davPath, auth) {
   }
   const parsed = await parseDavDestination(request, davPath, auth, env, true);
   if (parsed instanceof Response) return parsed;
+
   const { srcKey, dstKey } = parsed;
   try {
     const overwrite = request.headers.get('Overwrite') !== 'F';
@@ -1380,6 +1836,10 @@ async function handleDavMove(request, env, davPath, auth) {
   }
 }
 
+
+/**
+ * WebDAV: COPY - 复制文件或文件夹
+ */
 async function handleDavCopy(request, env, davPath, auth) {
   const settings = await getGlobalSettings(env);
   if (await isDavReadOnly(settings, auth, env)) {
@@ -1410,16 +1870,35 @@ async function handleDavCopy(request, env, davPath, auth) {
   }
 }
 
+
+
+/**
+ * WebDAV: LOCK - 返回空锁（兼容Windows/webdav客户端）
+ */
 function handleDavLock(request, env, davPath) {
   const lockToken = 'opaquelocktoken:' + generateId(16);
   const body = '<?xml version="1.0" encoding="utf-8"?>\n<D:prop xmlns:D="DAV:">\n<D:lockdiscovery>\n<D:activelock>\n<D:locktype><D:write/></D:locktype>\n<D:lockscope><D:exclusive/></D:lockscope>\n<D:depth>infinity</D:depth>\n<D:timeout>Second-3600</D:timeout>\n<D:locktoken><D:href>' + davXmlEsc(lockToken) + '</D:href></D:locktoken>\n</D:activelock>\n</D:lockdiscovery>\n</D:prop>';
   return new Response(body, { status: 200, headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Lock-Token': '<' + lockToken + '>' } });
 }
 
+
+/**
+ * WebDAV: UNLOCK - 返回204（兼容客户端）
+ */
 function handleDavUnlock(request, env, davPath) {
   return new Response(null, { status: 204 });
 }
 
+
+
+// ============================================================
+// ========== WebDAV 请求统一入口 & 路由 ==========
+// ============================================================
+
+/**
+ * WebDAV请求统一入口（路由到各个DAV方法处理函数）
+
+ */
 async function handleWebDAV(request, env) {
   const url = new URL(request.url);
   const method = request.method.toUpperCase();
@@ -1479,6 +1958,7 @@ async function handleWebDAV(request, env) {
       return handleDavUnlock(request, env, davPath);
     default:
       return new Response('Method Not Allowed', { status: 405 });
+
   }
 }
 
@@ -1527,7 +2007,6 @@ const CSS_STYLES = `
     --shadow-lg: 0 8px 30px rgba(0,0,0,0.6);
   }
 
-  /* Theme Toggle Button */
   .theme-toggle {
     background: none; border: 1px solid var(--border); border-radius: 50%;
     width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
@@ -1536,7 +2015,6 @@ const CSS_STYLES = `
   }
   .theme-toggle:hover { background: var(--surface-hover); }
 
-  /* Dark Mode Overrides */
   [data-theme="dark"] .header { background: rgba(28,28,30,0.72); }
   [data-theme="dark"] .btn-secondary { background: rgba(255,255,255,0.08); }
   [data-theme="dark"] .btn-secondary:hover { background: rgba(255,255,255,0.14); }
@@ -1589,8 +2067,6 @@ const CSS_STYLES = `
   .sidebar-divider { height: 1px; background: var(--border); margin: 8px 12px; }
   .main-content { flex: 1; min-width: 0; }
   .container { padding: 0; }
-
-  /* Buttons */
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
     padding: 8px 18px; border: none; border-radius: var(--radius-sm);
@@ -1618,8 +2094,6 @@ const CSS_STYLES = `
     background: #e0352b;
   }
   .btn-sm { padding: 5px 12px; font-size: 12px; }
-
-  /* Forms */
   .form-group { margin-bottom: 18px; }
   .form-label {
     display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500;
@@ -1637,8 +2111,6 @@ const CSS_STYLES = `
   }
   .form-select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2386868b' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 36px; }
   .form-help { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
-
-  /* Toggle Switch */
   .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
   .toggle-switch input { opacity: 0; width: 0; height: 0; }
   .toggle-slider {
@@ -1651,15 +2123,11 @@ const CSS_STYLES = `
   }
   .toggle-switch input:checked + .toggle-slider { background: var(--primary); }
   .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
-
-  /* Cards */
   .card {
     padding: 0; position: relative;
   }
   .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
   .card-title { font-size: 18px; font-weight: 600; }
-
-  /* Header */
   .header {
     background: rgba(255,255,255,0.72); backdrop-filter: var(--blur);
     -webkit-backdrop-filter: var(--blur);
@@ -1672,8 +2140,6 @@ const CSS_STYLES = `
     letter-spacing: -0.02em;
   }
   .header-actions { display: flex; gap: 8px; }
-
-  /* Search */
   .search-group { display: flex; align-items: stretch; flex: 1; max-width: 420px; margin: 0 16px; position: relative; }
   .search-box { position: relative; flex: 1; }
   .search-input {
@@ -1722,8 +2188,6 @@ const CSS_STYLES = `
   .search-result-size { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
   .search-empty { padding: 16px; text-align: center; color: var(--text-muted); font-size: 13px; }
   .search-result-name mark { background: rgba(0,122,255,0.15); color: var(--primary); font-weight: 600; border-radius: 2px; padding: 0 1px; }
-
-  /* Breadcrumb */
   .breadcrumb {
     display: flex; align-items: center; gap: 2px;
     padding: 4px 0; flex-wrap: wrap; font-size: 14px;
@@ -1732,8 +2196,6 @@ const CSS_STYLES = `
   .breadcrumb-item:hover { color: var(--primary); }
   .breadcrumb-item.active { color: var(--text); font-weight: 500; }
   .breadcrumb-separator { color: var(--border-strong); margin: 0 2px; }
-
-  /* Nav Buttons (Back/Forward) */
   .nav-btn {
     width: 26px; height: 26px; border: 1px solid var(--border);
     border-radius: var(--radius-sm); background: var(--surface);
@@ -1743,8 +2205,6 @@ const CSS_STYLES = `
   }
   .nav-btn:hover:not(:disabled) { background: rgba(0,122,255,0.1); color: var(--primary); border-color: var(--primary); }
   .nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-
-  /* File Grid */
   .file-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 8px; min-height: 200px; position: relative;
@@ -1788,8 +2248,6 @@ const CSS_STYLES = `
   .file-meta {
     font-size: 11px; color: var(--text-muted); text-align: center;
   }
-
-  /* View Toggle */
   .view-toggle {
     display: flex; background: rgba(0,0,0,0.04); border-radius: var(--radius-sm);
     overflow: hidden;
@@ -1801,8 +2259,6 @@ const CSS_STYLES = `
   }
   .view-toggle-btn:hover { color: var(--text); }
   .view-toggle-btn.active { background: var(--primary); color: #fff; }
-
-  /* List View */
   .file-list { display: block !important; min-height: auto; }
   .file-list .file-item {
     display: grid; grid-template-columns: 36px 1fr 100px 80px 70px; align-items: center;
@@ -1824,8 +2280,6 @@ const CSS_STYLES = `
   .sortable-header { transition: color var(--transition); }
   .sortable-header:hover { color: var(--primary); }
   .sortable-header.active { color: var(--primary); }
-
-  /* Toolbar */
   .toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
   .selection-info {
     margin-left: auto; padding: 6px 14px; background: var(--primary);
@@ -1833,8 +2287,6 @@ const CSS_STYLES = `
     display: none; animation: fadeIn 0.2s ease;
   }
   .selection-info.active { display: inline-block; }
-
-  /* Modal */
   .modal-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.3); backdrop-filter: blur(4px);
@@ -1859,8 +2311,6 @@ const CSS_STYLES = `
     align-items: center; justify-content: center; transition: all var(--transition);
   }
   .modal-close:hover { background: rgba(0,0,0,0.06); color: var(--text); }
-
-  /* Preview */
   .preview-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.92); display: flex; flex-direction: column;
@@ -1907,8 +2357,6 @@ const CSS_STYLES = `
   .preview-markdown th, .preview-markdown td { border: 1px solid var(--border); padding: 8px 12px; }
   .preview-loading { display: flex; flex-direction: column; align-items: center; gap: 16px; color: rgba(255,255,255,0.8); }
   .preview-error { text-align: center; color: var(--error); }
-
-  /* Toast */
   .toast-container { position: fixed; top: 20px; right: 20px; z-index: 3000; display: flex; flex-direction: column; gap: 8px; }
   .toast {
     padding: 14px 18px; border-radius: var(--radius-sm); color: #fff; font-size: 14px;
@@ -1924,8 +2372,6 @@ const CSS_STYLES = `
   @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes selectPulse { 0% { background: rgba(0,122,255,0.08); } 50% { background: rgba(0,122,255,0.25); } 100% { background: transparent; } }
-
-  /* Stats */
   .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 30px; }
   .stat-card {
     background: var(--surface); border-radius: var(--radius-lg); padding: 28px 24px;
@@ -1933,8 +2379,6 @@ const CSS_STYLES = `
   }
   .stat-value { font-size: 40px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; }
   .stat-label { color: var(--text-muted); font-size: 13px; margin-top: 6px; }
-
-  /* Tabs */
   .tabs {
     display: flex; gap: 4px; background: rgba(0,0,0,0.04); padding: 4px;
     border-radius: var(--radius); margin-bottom: 24px;
@@ -1949,8 +2393,6 @@ const CSS_STYLES = `
   .tab:hover:not(.active) { color: var(--text); }
   .tab-content { display: none; }
   .tab-content.active { display: block; animation: fadeIn 0.25s ease; }
-
-  /* Badge */
   .badge {
     display: inline-block; padding: 3px 8px; border-radius: 12px;
     font-size: 11px; font-weight: 600;
@@ -1960,15 +2402,11 @@ const CSS_STYLES = `
   .badge-error { background: rgba(255,59,48,0.12); color: var(--error); }
   .badge-info { background: rgba(0,122,255,0.12); color: var(--primary); }
   .badge-guest { background: rgba(175,82,222,0.12); color: #af52de; }
-
-  /* Table */
   .table-container { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
   th { font-weight: 600; color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
   tr:hover { background: var(--surface-hover); }
-
-  /* Login/Share container */
   .login-container {
     min-height: 100vh; display: flex; align-items: center; justify-content: center;
     background: linear-gradient(180deg, #f5f5f7 0%, #e8e8ed 100%); padding: 20px;
@@ -1989,12 +2427,8 @@ const CSS_STYLES = `
   .share-filename { font-size: 18px; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
   .share-filesize { color: var(--text-muted); margin-bottom: 24px; }
   .share-expired { color: var(--error); font-size: 16px; }
-
-  /* Empty State */
   .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
   .empty-icon { font-size: 56px; margin-bottom: 12px; opacity: 0.4; }
-
-  /* Loading */
   .spinner {
     width: 36px; height: 36px; border: 3px solid rgba(0,0,0,0.08);
     border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite;
@@ -2006,8 +2440,6 @@ const CSS_STYLES = `
     -webkit-backdrop-filter: blur(4px);
     display: flex; align-items: center; justify-content: center; z-index: 3000;
   }
-
-  /* Upload */
   .upload-overlay {
     position: absolute; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,122,255,0.06); border: 2px dashed var(--primary);
@@ -2039,8 +2471,6 @@ const CSS_STYLES = `
   .upload-progress-info { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--text-muted); }
   .upload-progress-filename { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .upload-progress-percentage { font-weight: 600; color: var(--primary); }
-
-  /* Context Menu */
   .context-menu {
     position: fixed; background: rgba(255,255,255,0.95);
     backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
@@ -2057,8 +2487,6 @@ const CSS_STYLES = `
   .context-menu-item:hover { background: rgba(0,122,255,0.06); color: var(--primary); }
   .context-menu-item.danger:hover { background: rgba(255,59,48,0.06); color: var(--error); }
   .context-menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
-
-  /* Ace Editor */
   .editor-tool-btn {
     background: none; border: none; color: #86868b; cursor: pointer;
     font-size: 13px; padding: 3px 7px; border-radius: 4px; line-height: 1;
@@ -2096,10 +2524,6 @@ const CSS_STYLES = `
     position: absolute; right: 0; bottom: 20px; width: 14px; height: 14px;
     cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #555 50%); z-index: 2;
   }
-
-  /* Responsive */
-
-  /* Mobile sidebar toggle – hidden on desktop */
   .sidebar-toggle { display: none; }
   .sidebar-backdrop { display: none; }
   .mobile-upload-bar { display: none; }
@@ -2108,7 +2532,6 @@ const CSS_STYLES = `
     html { font-size: 15px; }
     body { -webkit-tap-highlight-color: transparent; }
 
-    /* Header – stack + compact */
     .header { padding: 10px 14px; gap: 8px; flex-wrap: wrap; }
     .logo { font-size: 18px; white-space: nowrap; }
     .search-group { max-width: 100%; width: 100%; margin: 0; order: 3; }
@@ -2116,7 +2539,6 @@ const CSS_STYLES = `
     .header-actions .btn { padding: 6px 12px; font-size: 12px; }
     #adminBtn { display: none; }
 
-    /* Sidebar – hide by default, toggle via JS */
     .sidebar {
       position: fixed; top: 0; left: 0; bottom: 0; z-index: 500;
       width: 260px; background: var(--surface); box-shadow: var(--shadow-lg);
@@ -2134,8 +2556,6 @@ const CSS_STYLES = `
       background: rgba(0,0,0,0.3); backdrop-filter: blur(2px);
     }
     .sidebar-backdrop.active { display: block; }
-
-    /* Hamburger menu button */
     .sidebar-toggle {
       display: flex; width: 36px; height: 36px; border: 1px solid var(--border);
       border-radius: var(--radius-sm); background: var(--surface);
@@ -2148,19 +2568,14 @@ const CSS_STYLES = `
     .main-layout { flex-direction: column; padding: 0; gap: 0; }
     .main-content { width: 100%; }
 
-    /* Toolbar – hidden on mobile */
     .toolbar { display: none; }
 
-    /* Container */
     .container { padding: 0; }
 
-    /* File grid – 2 columns for mobile */
     .file-grid:not(.file-list) { grid-template-columns: repeat(2, 1fr); gap: 4px; min-height: 100px; }
     .file-item { padding: 5px 4px; gap: 1px; }
     .file-item .file-icon { font-size: 28px; }
     .file-item .file-name { font-size: 18px; line-height: 1.3; }
-
-    /* List view */
     .file-list .file-item { grid-template-columns: 40px 1fr 68px 50px; gap: 8px; padding: 8px 10px; align-items: center; }
     .file-list-header { grid-template-columns: 40px 1fr 68px 50px; gap: 8px; padding: 4px 10px; font-size: 12px; }
     .file-list .file-icon { font-size: 28px; flex-shrink: 0; }
@@ -2170,10 +2585,8 @@ const CSS_STYLES = `
     .file-list-header > *:nth-child(4) { text-align: right; }
     .file-list-header > *:nth-child(5) { display: none; }
 
-    /* Breadcrumb */
     .breadcrumb { font-size: 12px; padding: 4px 12px; }
 
-    /* Modals */
     .modal { padding: 20px; width: 94%; max-width: 100%; border-radius: var(--radius-lg); }
     .modal-title { font-size: 16px; }
     .modal-overlay { align-items: flex-end; }
@@ -2182,37 +2595,29 @@ const CSS_STYLES = `
       max-height: 90vh; margin-bottom: 0;
     }
 
-    /* Login / Share cards */
     .login-card, .share-card { padding: 28px 20px; max-width: 100%; margin: 0 8px; border-radius: var(--radius-lg); }
     .login-container { padding: 12px; align-items: flex-start; padding-top: 10vh; }
 
-    /* Preview overlay */
     .preview-header { padding: 10px 14px; gap: 8px; }
     .preview-filename { font-size: 14px; }
     .preview-overlay .btn { padding: 6px 12px; font-size: 12px; }
 
-    /* Admin page */
     .stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
     .stat-card { padding: 18px 12px; }
     .stat-value { font-size: 28px; }
     .stat-label { font-size: 12px; }
 
-    /* Admin tables */
     .table-container { margin: 0 -8px; }
     th, td { padding: 8px 10px; font-size: 12px; white-space: nowrap; }
 
-    /* Buttons – touch friendly */
     .btn { min-height: 40px; }
     .btn-sm { min-height: 32px; padding: 4px 10px; font-size: 11px; }
     .modal-close { width: 36px; height: 36px; font-size: 24px; }
 
-    /* Form inputs */
     .form-input, .form-select { padding: 10px 12px; font-size: 16px; }
 
-    /* Card – full width */
     .card { padding: 12px 8px; border-radius: 0; border: none; box-shadow: none; }
 
-    /* Footer upload bar (fixed bottom) */
     .mobile-upload-bar {
       display: flex; position: fixed; bottom: 0; left: 0; right: 0;
       padding: 10px 14px; padding-bottom: max(10px, env(safe-area-inset-bottom));
@@ -2260,6 +2665,7 @@ const SHARED_SCRIPTS =
       const current = html.getAttribute('data-theme') || 'light';
       const next = current === 'dark' ? 'light' : 'dark';
       html.setAttribute('data-theme', next);
+      // 读写浏览器本地存储
       localStorage.setItem('theme', next);
       document.querySelectorAll('.theme-toggle').forEach(function(btn) {
         btn.textContent = next === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
@@ -2278,6 +2684,7 @@ const SHARED_SCRIPTS =
     }
 
     async function logout() {
+      // 调用后端 API
       try { await fetch('/api/logout', { method: 'POST' }); } catch (e) {}
       window.location.href = '/login.html';
     }
@@ -2341,6 +2748,10 @@ const LOGIN_PAGE = `
   <div class="toast-container" id="toastContainer"></div>
 
   <script>
+    /**
+     * 处理登录请求
+     * 验证邮箱+密码 → 生成JWT → 设置Cookie
+     */
     function handleLogin(e) {
       e.preventDefault();
       const email = document.getElementById('email').value.trim();
@@ -2848,7 +3259,6 @@ const INDEX_PAGE = `
 
       checkAuth().then(() => {
         updateNavButtons();
-        // 并行加载文件和收藏夹，互不依赖，减少等待时间
         Promise.all([loadFiles(), initFavorites()]).then(() => {
           initDragUpload();
           initContextMenu();
@@ -2859,8 +3269,10 @@ const INDEX_PAGE = `
 
 let favorites = [];
 
+/**
+ * 前端：初始化收藏夹（从localStorage加载）
+ */
 async function initFavorites() {
-  // 优先使用服务端嵌入数据，省掉 /api/favorites KV 读取
   if (window.__INIT__ && window.__INIT__.favorites) {
     favorites = window.__INIT__.favorites;
     renderFavorites();
@@ -2872,6 +3284,9 @@ async function initFavorites() {
   highlightCurrentFavorite();
 }
 
+/**
+ * 前端：从服务端加载收藏夹列表（API调用）
+ */
 async function loadFavorites() {
   try {
     const response = await fetch('/api/favorites');
@@ -2884,6 +3299,9 @@ async function loadFavorites() {
   }
 }
 
+/**
+ * 前端：渲染收藏夹侧边栏
+ */
 function renderFavorites() {
   const container = document.getElementById('favoritesList');
   if (!container) return;
@@ -2906,6 +3324,9 @@ function renderFavorites() {
   highlightCurrentFavorite();
 }
 
+/**
+ * 前端：添加当前文件/文件夹到收藏夹
+ */
 async function addFavorite() {
   const pathParts = currentPath.replace(/\\/$/, '').split('/').filter(Boolean);
   const name = pathParts.length > 0 ? pathParts[pathParts.length - 1] : '根目录';
@@ -2933,6 +3354,9 @@ async function addFavorite() {
   }
 }
 
+/**
+ * 前端：删除收藏夹项（按index）
+ */
 async function removeFavorite(index) {
   try {
     const response = await fetch('/api/favorites?index=' + index, {
@@ -2951,14 +3375,12 @@ async function removeFavorite(index) {
   }
 }
 
-// --- 收藏夹拖拽排序 ---
 let _favDragIndex = -1;
 
 function onFavDragStart(event, index) {
   _favDragIndex = index;
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', index);
-  // 延迟添加 dragging 样式，避免截屏时包含它
   requestAnimationFrame(() => {
     event.target.classList.add('sidebar-item-dragging');
   });
@@ -2981,11 +3403,9 @@ async function onFavDrop(event, toIndex) {
   const fromIndex = _favDragIndex;
   if (fromIndex < 0 || fromIndex === toIndex) return;
 
-  // 本地重排
   const [moved] = favorites.splice(fromIndex, 1);
   favorites.splice(toIndex, 0, moved);
 
-  // 保存新顺序到服务端
   try {
     const response = await fetch('/api/favorites/order', {
       method: 'PUT',
@@ -3004,7 +3424,6 @@ async function onFavDrop(event, toIndex) {
   renderFavorites();
 }
 
-// 拖拽结束时清理
 document.addEventListener('dragend', () => {
   _favDragIndex = -1;
   document.querySelectorAll('.sidebar-item-dragging').forEach(el => el.classList.remove('sidebar-item-dragging'));
@@ -3266,7 +3685,6 @@ function handleItemClick(event, element) {
       selectSingle(element);
     }
   } else if (isMobile) {
-    // 移动端：点击直接打开
     const type = element.dataset.type;
     const path = element.dataset.path;
     if (type === 'folder') {
@@ -3399,7 +3817,6 @@ function initMultiSelect() {
 
     async function checkAuth() {
       try {
-        // 优先使用服务端嵌入的初始数据，省掉 /api/auth/check 请求
         if (window.__INIT__) {
           currentUserRole = window.__INIT__.role || 'user';
         } else {
@@ -3656,7 +4073,6 @@ sortedFiles.forEach(file => {
       updateNavButtons();
       loadFiles();
       highlightCurrentFavorite();
-      // close mobile sidebar on navigate
       var sidebar = document.getElementById('sidebar');
       if (sidebar && sidebar.classList.contains('open')) toggleSidebar();
     }
@@ -3766,8 +4182,6 @@ sortedFiles.forEach(file => {
 
     async function uploadFiles(files) {
       if (!files || files.length === 0) return;
-
-      // 上传前检测文件大小（100MB）
       var oversizedNames = [];
       for (var i = 0; i < files.length; i++) {
         if (files[i].size > 100 * 1024 * 1024) {
@@ -3801,8 +4215,6 @@ sortedFiles.forEach(file => {
         if (files[i].size <= SMALL) smallFiles.push(files[i]);
         else largeFiles.push(files[i]);
       }
-
-      // 上传一个大文件（逐个，有实时进度）
       async function uploadLarge(file) {
         progressFilename.textContent = file.name + ' (' + (successCount + failCount + 1) + '/' + totalFiles + ')';
         return new Promise((resolve) => {
@@ -3832,8 +4244,6 @@ sortedFiles.forEach(file => {
           xhr.send(fd);
         });
       }
-
-      // 先并发上传小文件
       if (smallFiles.length > 0) {
         progressFilename.textContent = '上传小文件...（' + smallFiles.length + ' 个）';
         await Promise.all(smallFiles.map(file => {
@@ -3856,8 +4266,6 @@ sortedFiles.forEach(file => {
           });
         }));
       }
-
-      // 再逐个上传大文件
       for (let i = 0; i < largeFiles.length; i++) {
         await uploadLarge(largeFiles[i]);
       }
@@ -4732,8 +5140,6 @@ const ADMIN_PAGE = `
 
         if (data.success) {
           const tbody = document.getElementById('usersTable');
-
-          // 游客始终显示在列表顶部，其余为注册用户
           const guestUser = data.users.find(u => u.email === '__guest__');
           const normalUsers = data.users.filter(u => u.email !== '__guest__');
 
@@ -4813,8 +5219,6 @@ const ADMIN_PAGE = `
         showToast('复制失败', 'error');
       });
     }
-
-    // === 系统设置 ===
     let _userPermsEmail = '';
 
     async function loadSettings() {
@@ -4872,13 +5276,10 @@ const ADMIN_PAGE = `
       }
       setTimeout(() => { msgEl.textContent = ''; }, 3000);
     }
-
-    // === 用户权限设置 ===
     async function showUserPermsModal(email) {
       _userPermsEmail = email;
       const isGuest = email === '__guest__';
       document.getElementById('permsUserEmail').textContent = isGuest ? '游客' : email;
-      // 游客不能修改角色，隐藏角色下拉
       const roleGroup = document.getElementById('permsRole').parentElement;
       roleGroup.style.display = isGuest ? 'none' : '';
       document.getElementById('permsRole').value = 'user';
@@ -5107,13 +5508,11 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // 屏蔽无用请求，避免浪费 Worker 调用配额
     if (path === '/favicon.ico' || path === '/robots.txt' || path === '/.well-known' || path.startsWith('/.well-known/')) {
       return new Response(null, { status: 404 });
     }
 
     try {
-      // WebDAV 路由
       if (path.startsWith('/dav')) {
         return await handleWebDAV(request, env);
       }
@@ -5269,9 +5668,8 @@ export default {
         if (!auth) {
           return Response.redirect(url.origin + '/login.html', 302);
         }
-        // 预加载 favorites，嵌入 HTML 省掉前端一次 KV 读取
         const favKey = getFavoritesKey(auth);
-        const favRaw = await env.KV_STORE.get(favKey);
+        const favRaw = await env.KV_STORE.get(favKey);  // 从 KV 读取（键值存储，用于收藏夹/设置/分享）
         const favorites = favRaw ? JSON.parse(favRaw) : [];
         const initData = {
           role: auth.role,

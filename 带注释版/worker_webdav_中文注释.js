@@ -2,7 +2,7 @@
  * name = "mycloud-single"
  * WebDAV-only 精简版 —— 只保留 WebDAV 功能，无 UI
  *
- * 认证方式：HTTP Basic Auth（用户在 WebDAV 客户端中输入密码）
+ * 认证方式：HTTP Basic Auth（用户在 WebDAV 客户端中输入密码 账户随意）
  * WebDAV 端点：/dav/
  *
  * [[r2_buckets]]
@@ -13,8 +13,13 @@
  * ADMIN_PASSWORD = "你的管理员密码"
  */
 
-// --- 工具函数 ---
+// ========== 工具函数 ==========
 
+/**
+ * 根据文件扩展名获取对应的 MIME 类型
+ * @param {string} filename - 文件名
+ * @returns {string} MIME 类型
+ */
 function getMimeType(filename) {
   const ext = filename.split('.').pop().toLowerCase();
   const mimeTypes = {
@@ -46,17 +51,27 @@ function getMimeType(filename) {
   return mimeTypes[ext] || 'application/octet-stream';
 }
 
+/**
+ * 标准化路径：去掉开头斜杠，去掉末尾斜杠
+ * @param {string} p - 原始路径
+ * @returns {string} 标准化后的路径
+ */
 function normalizePath(p) {
   if (!p) return '';
   if (p.startsWith('/')) p = p.slice(1);
   return p;
 }
 
-// --- R2 辅助函数 ---
-
+/**
+ * 递归删除 R2 中的文件夹（包括所有子文件和子文件夹）
+ * @param {object} env - Worker 环境变量
+ * @param {string} key - 要删除的文件夹路径（R2 key前缀）
+ */
 async function deleteR2Folder(env, key) {
+  // 分页游标：用于批量列出 R2 对象（一次最多1000个）
   let cursor;
   do {
+    // 列出当前前缀下的所有对象（分批处理，避免一次过多）
     const batch = await env.R2_BUCKET.list({ prefix: key + '/', cursor });
     if (batch.objects?.length) {
       await env.R2_BUCKET.delete(batch.objects.map(obj => obj.key));
@@ -66,11 +81,19 @@ async function deleteR2Folder(env, key) {
   await env.R2_BUCKET.delete(key);
 }
 
+/**
+ * 递归复制 R2 中的文件夹到新位置
+ * @param {object} env - Worker 环境变量
+ * @param {string} srcKey - 源文件夹路径
+ * @param {string} dstKey - 目标文件夹路径
+ */
 async function copyR2Folder(env, srcKey, dstKey) {
+  // 分页游标：用于批量列出源文件夹中的对象
   let cursor;
   do {
     const batch = await env.R2_BUCKET.list({ prefix: srcKey + '/', cursor });
     if (batch.objects?.length) {
+      // 批量获取源文件内容（并行读取，提高效率）
       const srcObjects = await Promise.all(
         batch.objects.map(obj => env.R2_BUCKET.get(obj.key))
       );
@@ -87,7 +110,12 @@ async function copyR2Folder(env, srcKey, dstKey) {
   } while (cursor);
 }
 
-// 解析 WebDAV MOVE/COPY 的 Destination header，返回 { srcKey, dstKey }
+/**
+ * 解析 WebDAV Destination 请求头，获取移动/复制操作的目标路径
+ * @param {Request} request - HTTP 请求对象
+ * @param {string} davPath - 当前 WebDAV 路径
+ * @returns {object|Response} 包含 srcKey 和 dstKey 的对象，或错误 Response
+ */
 async function parseDavDestination(request, davPath) {
   const destHeader = request.headers.get('Destination');
   if (!destHeader) return new Response('Missing Destination header', { status: 400 });
@@ -102,16 +130,31 @@ async function parseDavDestination(request, davPath) {
   }
 }
 
-// --- WebDAV XML 辅助 ---
 
+/**
+ * XML 特殊字符转义（防XML注入）
+ * @param {string} s - 原始字符串
+ * @returns {string} 转义后的字符串
+ */
 function xmlEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/**
+ * 将日期转换为 RFC 1123 格式（HTTP 标准日期格式）
+ * @param {Date|string} d - 日期对象或日期字符串
+ * @returns {string} RFC 1123 格式日期字符串
+ */
 function rfc1123Date(d) {
   return new Date(d).toUTCString();
 }
 
+/**
+ * 构建 WebDAV XML 响应
+ * @param {string} body - XML 响应体内容
+ * @param {number} status - HTTP 状态码，默认 207 (MultiStatus)
+ * @returns {Response} WebDAV XML 响应对象
+ */
 function davXmlResponse(body, status = 207) {
   const xml = '<?xml version="1.0" encoding="utf-8"?>\n' + body;
   return new Response(xml, {
@@ -120,12 +163,17 @@ function davXmlResponse(body, status = 207) {
   });
 }
 
-// --- 认证 ---
-
+/**
+ * 验证 WebDAV 请求的 HTTP Basic Auth 认证
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量（含 ADMIN_PASSWORD）
+ * @returns {object|null} 认证成功返回用户信息，失败返回 null
+ */
 async function verifyDavAuth(request, env) {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Basic ')) return null;
   try {
+      // 解码 Base64 编码的 Basic Auth 凭证（格式：username:password，这里只校验 password）
     const decoded = atob(authHeader.slice(6));
     const colon = decoded.indexOf(':');
     const pass = decoded.slice(colon + 1);
@@ -136,6 +184,12 @@ async function verifyDavAuth(request, env) {
   }
 }
 
+/**
+ * 返回 WebDAV 认证失败响应（401 Unauthorized）
+ * @param {Request} request - HTTP 请求对象
+ * @param {string} resType - 响应类型：'text' 或 'xml'
+ * @returns {Response} 401 未授权响应
+ */
 function requireDavAuth(request, resType = 'text') {
   const headers = {
     'WWW-Authenticate': 'Basic realm="WebDAV", charset="UTF-8"',
@@ -149,8 +203,10 @@ function requireDavAuth(request, resType = 'text') {
   return new Response('Unauthorized', { status: 401, headers });
 }
 
-// --- WebDAV 方法处理 ---
-
+/**
+ * 处理 WebDAV OPTIONS 请求（返回支持的 HTTP 方法）
+ * @returns {Response} OPTIONS 响应，包含 Allow 和 DAV 头
+ */
 function handleDavOptions() {
   return new Response(null, {
     status: 200,
@@ -163,16 +219,25 @@ function handleDavOptions() {
   });
 }
 
+// ========== WebDAV 核心处理方法 ==========
+/**
+ * 处理 WebDAV PROPFIND 请求（列出文件/文件夹属性）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径
+ * @returns {Response} 包含文件属性的 XML 响应（207 MultiStatus）
+ */
 async function handleDavPropfind(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request, 'xml');
 
   try {
+    // 获取 WebDAV Depth 头（infinity|0|1）：决定列出多少层目录
     const depth = request.headers.get('Depth') || 'infinity';
+    // 构建 WebDAV 基础 URL（用于生成响应中的 href 路径）
     const baseUrl = new URL(request.url).origin + '/dav/';
-
-    // 检查是否是文件
     const fileObj = davPath ? await env.R2_BUCKET.get(davPath) : null;
+      // 情况1：davPath 是一个具体文件 → 返回单文件属性
     if (fileObj) {
       const name = davPath.split('/').pop();
       const mtime = fileObj.uploaded || new Date();
@@ -195,8 +260,7 @@ async function handleDavPropfind(request, env, davPath) {
 </d:multistatus>`;
       return new Response(xml, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
     }
-
-    // 目录 —— 列出内容
+      // 情况2：davPath 是文件夹 → 列出文件夹内容
     const prefix = davPath ? davPath + '/' : '';
     const objects = [];
     const folders = new Set();
@@ -219,8 +283,6 @@ async function handleDavPropfind(request, env, davPath) {
     } while (cursor);
 
     let xml = '<d:multistatus xmlns:d="DAV:">\n';
-
-    // 当前目录本身
     if (depth !== '1') {
       xml += `  <d:response>
     <d:href>${xmlEscape(baseUrl + (davPath ? davPath + '/' : ''))}</d:href>
@@ -241,8 +303,6 @@ async function handleDavPropfind(request, env, davPath) {
       xml += '</d:multistatus>';
       return davXmlResponse(xml);
     }
-
-    // 子文件夹
     for (const folderName of folders) {
       const folderPath = (davPath ? davPath + '/' : '') + folderName;
       xml += `  <d:response>
@@ -259,8 +319,6 @@ async function handleDavPropfind(request, env, davPath) {
     </d:propstat>
   </d:response>\n`;
     }
-
-    // 子文件
     for (const obj of objects) {
       const objPath = obj.key;
       const name = objPath.split('/').pop();
@@ -292,6 +350,13 @@ async function handleDavPropfind(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV GET 请求（下载文件）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（文件路径）
+ * @returns {Response} 文件内容响应，或文件夹的 PROPFIND 响应
+ */
 async function handleDavGet(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -322,6 +387,13 @@ async function handleDavGet(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV HEAD 请求（获取文件头信息，不返回内容）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径
+ * @returns {Response} 只有响应头的 Response
+ */
 async function handleDavHead(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -352,15 +424,21 @@ async function handleDavHead(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV PUT 请求（上传/创建文件）
+ * @param {Request} request - HTTP 请求对象（包含文件内容）
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（目标文件路径）
+ * @returns {Response} 201 创建成功，或 405/412 错误
+ */
 async function handleDavPut(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request);
 
   try {
     const key = davPath;
+    // 检查 Overwrite 头：F=false 时不允许覆盖已存在的文件
     const overwrite = request.headers.get('Overwrite') !== 'F';
-
-    // 检查目标是否是文件夹
     const folderCheck = await env.R2_BUCKET.list({ prefix: key + '/', delimiter: '/', limit: 1 });
     if (folderCheck.objects?.length > 0 || folderCheck.delimitedPrefixes?.length > 0) {
       return new Response('Target is a collection', { status: 405 });
@@ -379,6 +457,13 @@ async function handleDavPut(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV DELETE 请求（删除文件或文件夹）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（要删除的文件/文件夹路径）
+ * @returns {Response} 204 删除成功
+ */
 async function handleDavDelete(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -391,6 +476,13 @@ async function handleDavDelete(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV MKCOL 请求（创建文件夹）
+ * @param {Request} request - HTTP 请求对象
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（新文件夹路径）
+ * @returns {Response} 201 创建成功
+ */
 async function handleDavMkcol(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -406,8 +498,6 @@ async function handleDavMkcol(request, env, davPath) {
     if (existingDir.objects?.length > 0 || existingDir.delimitedPrefixes?.length > 0) {
       return new Response(null, { status: 201 });
     }
-
-    // R2 没有真正目录，写一个 .keep 占位文件
     await env.R2_BUCKET.put(key + '/.keep', '', { httpMetadata: { contentType: 'text/plain' } });
     return new Response(null, { status: 201 });
   } catch (e) {
@@ -415,6 +505,13 @@ async function handleDavMkcol(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV MOVE 请求（移动/重命名文件或文件夹）
+ * @param {Request} request - HTTP 请求对象（含 Destination 头）
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（源路径）
+ * @returns {Response} 201 移动成功
+ */
 async function handleDavMove(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -422,13 +519,14 @@ async function handleDavMove(request, env, davPath) {
   try {
     const parsed = await parseDavDestination(request, davPath);
     if (parsed instanceof Response) return parsed;
+    // 解析结果：srcKey=源路径，dstKey=目标路径
     const { srcKey, dstKey } = parsed;
 
+    // 检查 Overwrite 头：F=false 时不允许覆盖已存在的文件
     const overwrite = request.headers.get('Overwrite') !== 'F';
 
     const srcObj = await env.R2_BUCKET.get(srcKey);
     if (!srcObj) {
-      // 源是文件夹
       const srcCheck = await env.R2_BUCKET.list({ prefix: srcKey + '/', delimiter: '/', limit: 1 });
       if (!srcCheck.objects?.length && !srcCheck.delimitedPrefixes?.length) {
         return new Response('Not Found', { status: 404 });
@@ -450,6 +548,13 @@ async function handleDavMove(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV COPY 请求（复制文件或文件夹）
+ * @param {Request} request - HTTP 请求对象（含 Destination 头）
+ * @param {object} env - Worker 环境变量
+ * @param {string} davPath - WebDAV 路径（源路径）
+ * @returns {Response} 201 复制成功
+ */
 async function handleDavCopy(request, env, davPath) {
   const auth = await verifyDavAuth(request, env);
   if (!auth) return requireDavAuth(request);
@@ -457,9 +562,12 @@ async function handleDavCopy(request, env, davPath) {
   try {
     const parsed = await parseDavDestination(request, davPath);
     if (parsed instanceof Response) return parsed;
+    // 解析结果：srcKey=源路径，dstKey=目标路径
     const { srcKey, dstKey } = parsed;
 
+    // 检查 Overwrite 头：F=false 时不允许覆盖已存在的文件
     const overwrite = request.headers.get('Overwrite') !== 'F';
+    // 获取 WebDAV Depth 头（infinity|0|1）：决定列出多少层目录
     const depth = request.headers.get('Depth') || 'infinity';
 
     const srcObj = await env.R2_BUCKET.get(srcKey);
@@ -488,6 +596,10 @@ async function handleDavCopy(request, env, davPath) {
   }
 }
 
+/**
+ * 处理 WebDAV LOCK 请求（加锁，简化版：总是返回成功）
+ * @returns {Response} 锁定成功的 XML 响应
+ */
 function handleDavLock() {
   const xml = `<?xml version="1.0" encoding="utf-8"?>
 <d:prop xmlns:d="DAV:">
@@ -509,20 +621,30 @@ function handleDavLock() {
   });
 }
 
+/**
+ * 处理 WebDAV UNLOCK 请求（解锁，简化版：总是返回成功）
+ * @returns {Response} 204 解锁成功
+ */
 function handleDavUnlock() {
   return new Response(null, { status: 204 });
 }
 
-// ============================================================
-// Main router
-// ============================================================
+// ========== Worker 主入口 ==========
+/**
+ * Cloudflare Worker 主入口：处理所有传入的 HTTP 请求
+ * 路由逻辑：
+ *   1. OPTIONS 请求 → CORS 预检响应
+ *   2. /dav/* 路径 → WebDAV 处理
+ *   3. 其他 → 404 Not Found
+ */
 export default {
   async fetch(request, env, ctx) {
+  // 解析请求 URL 和路径
     const url = new URL(request.url);
+    // 解析请求 URL、路径和 HTTP 方法
+  // 处理 CORS 预检请求（OPTIONS）
     const path = decodeURIComponent(url.pathname);
     const method = request.method;
-
-    // CORS preflight
     if (method === 'OPTIONS' && path.startsWith('/dav')) {
       return new Response(null, {
         headers: {
@@ -539,6 +661,7 @@ export default {
         if (davPath.startsWith('/')) davPath = davPath.slice(1);
         davPath = davPath.replace(/\/$/, '');
 
+        // 根据 HTTP 方法分发到对应的 WebDAV 处理函数
         const methodMap = {
           'OPTIONS': () => handleDavOptions(),
           'PROPFIND': () => handleDavPropfind(request, env, davPath),
